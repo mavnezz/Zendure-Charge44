@@ -1,0 +1,61 @@
+{
+  "title": "charge44",
+  "config": {
+    "step": {
+      "user": {
+        "title": "charge44 Geräte",
+        "description": "Verbindet deine Zendure 800 Pro und Shelly 3EM Pro per lokalem MQTT.",
+        "data": {
+          "zendure_sn": "Zendure-Seriennummer",
+          "shelly_id": "Shelly-Geräte-ID"
+        },
+        "data_description": {
+          "zendure_sn": "Steht im Topic Zendure/sensor/{sn}/...",
+          "shelly_id": "Steht als Topic-Präfix (z. B. shellypro3em-{id})"
+        }
+      },
+      "tibber": {
+        "title": "Tibber + Solar-Prognose (optional)",
+        "description": "Tibber-API-Token für preisbasiertes Laden. Solar-Forecast-Sensor wählen — dann wird Netzladen übersprungen wenn die Sonne den Akku eh füllt. Beides optional.",
+        "data": {
+          "tibber_token": "Tibber-API-Token",
+          "forecast_entity": "Solar-Prognose-Sensor (verbleibend heute, kWh)"
+        }
+      },
+      "tibber_home": {
+        "title": "Tibber-Zuhause",
+        "description": "Welches Zuhause soll für die Preisabfrage genutzt werden?",
+        "data": {
+          "tibber_home_id": "Zuhause"
+        }
+      }
+    },
+    "error": {
+      "invalid_token": "Tibber-API-Token ungültig oder keine Zuhause gefunden."
+    },
+    "abort": {
+      "single_instance_allowed": "Nur eine charge44-Instanz erlaubt."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "charge44-Optionen",
+        "description": "Tibber-Token oder Solar-Prognose-Sensor ändern. Leerer Token deaktiviert Cheap-Charge.",
+        "data": {
+          "tibber_token": "Tibber-API-Token",
+          "forecast_entity": "Solar-Prognose-Sensor"
+        }
+      },
+      "pick_home": {
+        "title": "Tibber-Zuhause",
+        "data": {
+          "tibber_home_id": "Zuhause"
+        }
+      }
+    },
+    "error": {
+      "invalid_token": "Tibber-API-Token ungültig."
+    }
+  }
+}

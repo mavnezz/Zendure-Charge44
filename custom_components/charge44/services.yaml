@@ -1,0 +1,27 @@
+force_charge:
+  name: Force charge
+  description: Immediately enter cheap-charge mode — sets acMode to Input and inputLimit to charge_power, bypassing the price/SOC/forecast gates.
+
+stop_charge:
+  name: Stop charge
+  description: Leave cheap-charge mode and return to zero-export regulation.
+
+set_target_soc:
+  name: Set target SOC
+  description: Update the charge target SOC (where cheap-charge stops).
+  fields:
+    soc:
+      name: Target SOC
+      description: Target state of charge in percent (0-100).
+      required: true
+      example: 80
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+refresh_prices:
+  name: Refresh prices
+  description: Re-fetch today's and tomorrow's electricity prices from Tibber right now.

@@ -1,0 +1,61 @@
+{
+  "title": "charge44",
+  "config": {
+    "step": {
+      "user": {
+        "title": "charge44 devices",
+        "description": "Connect to your Zendure 800 Pro and Shelly 3EM Pro via local MQTT.",
+        "data": {
+          "zendure_sn": "Zendure serial number",
+          "shelly_id": "Shelly device ID"
+        },
+        "data_description": {
+          "zendure_sn": "Visible in the topic Zendure/sensor/{sn}/...",
+          "shelly_id": "Visible as the topic prefix (e.g. shellypro3em-{id})"
+        }
+      },
+      "tibber": {
+        "title": "Tibber + solar forecast (optional)",
+        "description": "Enter your Tibber API token for price-based charging. Pick a solar forecast sensor so cheap-charge is skipped when the sun will fill the battery anyway. Both optional — leave empty to skip.",
+        "data": {
+          "tibber_token": "Tibber API token",
+          "forecast_entity": "Solar forecast entity (remaining today, kWh)"
+        }
+      },
+      "tibber_home": {
+        "title": "Tibber home",
+        "description": "Select which home to fetch prices for.",
+        "data": {
+          "tibber_home_id": "Home"
+        }
+      }
+    },
+    "error": {
+      "invalid_token": "Tibber API token is invalid or no homes returned."
+    },
+    "abort": {
+      "single_instance_allowed": "Only one charge44 instance is allowed."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "charge44 options",
+        "description": "Update Tibber token or solar forecast entity. Leave Tibber token empty to disable cheap-charge.",
+        "data": {
+          "tibber_token": "Tibber API token",
+          "forecast_entity": "Solar forecast entity"
+        }
+      },
+      "pick_home": {
+        "title": "Tibber home",
+        "data": {
+          "tibber_home_id": "Home"
+        }
+      }
+    },
+    "error": {
+      "invalid_token": "Tibber API token is invalid."
+    }
+  }
+}
