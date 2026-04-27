@@ -1,6 +1,6 @@
 {
   "domain": "charge44",
-  "name": "charge44",
+  "name": "Zendure-Charge44",
   "codeowners": ["@mavnezz"],
   "config_flow": true,
   "dependencies": ["mqtt"],
@@ -9,5 +9,5 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/mavnezz/Zendure-Charge44/issues",
   "requirements": [],
-  "version": "0.10.9"
+  "version": "0.10.10"
 }
