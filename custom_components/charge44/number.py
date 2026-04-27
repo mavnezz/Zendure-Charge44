@@ -15,6 +15,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
     DEFAULT_MIN_SOC,
+    DEFAULT_MIN_SPREAD_CT,
     DEFAULT_TARGET_SOC,
     DEFAULT_TEMP_HIGH,
     DEFAULT_TEMP_LOW,
@@ -40,7 +41,7 @@ NUMBERS: tuple[Charge44NumberDescription, ...] = (
     Charge44NumberDescription(
         key="target_soc",
         name="SOC Max",
-        native_min_value=0,
+        native_min_value=51,
         native_max_value=100,
         native_step=1,
         native_unit_of_measurement=PERCENTAGE,
@@ -52,12 +53,23 @@ NUMBERS: tuple[Charge44NumberDescription, ...] = (
         key="min_soc",
         name="SOC Min",
         native_min_value=0,
-        native_max_value=100,
+        native_max_value=50,
         native_step=1,
         native_unit_of_measurement=PERCENTAGE,
         mode=NumberMode.SLIDER,
         state_key="min_soc",
         default=DEFAULT_MIN_SOC,
+    ),
+    Charge44NumberDescription(
+        key="min_spread",
+        name="Price Spread",
+        native_min_value=0,
+        native_max_value=50,
+        native_step=1,
+        native_unit_of_measurement="ct/kWh",
+        mode=NumberMode.SLIDER,
+        state_key="min_spread_ct",
+        default=DEFAULT_MIN_SPREAD_CT,
     ),
     Charge44NumberDescription(
         key="temp_low_limit",
