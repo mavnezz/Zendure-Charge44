@@ -531,6 +531,8 @@ class Charge44Coordinator:
         setattr(self.state, key, value)
         if key == "min_soc":
             self._publish_min_soc(int(value))
+        elif key == "target_soc":
+            self._publish_soc_set(int(value))
         self._notify()
 
     def _publish_min_soc(self, value: int) -> None:
@@ -541,6 +543,15 @@ class Charge44Coordinator:
             mqtt.async_publish(self.hass, topic, str(value), qos=1)
         )
         _LOGGER.debug("charge44: minSoc -> %s%%", value)
+
+    def _publish_soc_set(self, value: int) -> None:
+        topic = TOPIC_ZENDURE_WRITE.format(
+            kind="number", sn=self.zendure_sn, prop="socSet"
+        )
+        self.hass.async_create_task(
+            mqtt.async_publish(self.hass, topic, str(value), qos=1)
+        )
+        _LOGGER.debug("charge44: socSet -> %s%%", value)
 
     # -------- Tibber prices --------
 

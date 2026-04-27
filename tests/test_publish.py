@@ -36,6 +36,11 @@ def publishing(coord):
             f"Zendure/number/{coord.zendure_sn}/minSoc/set", str(value)
         )
 
+    def _publish_soc_set(value: int) -> None:
+        _rec_publish(
+            f"Zendure/number/{coord.zendure_sn}/socSet/set", str(value)
+        )
+
     def _publish_ac_mode(value: str) -> None:
         _rec_publish(f"Zendure/select/{coord.zendure_sn}/acMode/set", value)
 
@@ -47,6 +52,7 @@ def publishing(coord):
 
     coord._publish_input_limit = _publish_input_limit
     coord._publish_min_soc = _publish_min_soc
+    coord._publish_soc_set = _publish_soc_set
     coord._publish_ac_mode = _publish_ac_mode
     coord._publish_limit = _publish_limit
     return coord
@@ -92,10 +98,18 @@ def test_min_soc_setter_forwards_to_zendure(publishing):
     assert ("Zendure/number/TESTSN/minSoc/set", "25") in publishing._published
 
 
-def test_min_soc_setter_only_forwards_on_minSoc_key(publishing):
-    """Other set_setting calls must not trigger a minSoc publish."""
-    publishing.set_setting("target_soc", 90)
-    assert publishing._published == []  # nothing went out
+def test_target_soc_setter_forwards_to_zendure(publishing):
+    """The HA SOC Max slider must reach the device's socSet, otherwise the
+    Zendure keeps its own ceiling (default 100%) regardless of the slider."""
+    publishing.state.target_soc = 80
+    publishing.set_setting("target_soc", 85)
+    assert publishing.state.target_soc == 85
+    assert ("Zendure/number/TESTSN/socSet/set", "85") in publishing._published
+
+
+def test_set_setting_does_not_publish_for_unrelated_keys(publishing):
+    publishing.set_setting("efficiency", 90)
+    assert publishing._published == []
 
 
 # --- cheap-mode entry/exit choreography ------------------------------------
