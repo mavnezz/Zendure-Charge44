@@ -37,6 +37,8 @@ DEFAULT_KP = 0.5               # P-controller gain
 DEFAULT_DEADZONE = 5           # W, don't republish changes smaller than this
 MIN_PUBLISH_INTERVAL = 3.0     # s, rate limit between outputLimit writes
 STALE_GRID_AFTER = 15.0        # s, pause regulation if no fresh Shelly reading
+SAFETY_TICK_INTERVAL = 10.0    # s, how often to check for Shelly silence
+DEFAULT_FALLBACK_DISCHARGE = 0  # W, outputLimit when Shelly stops reporting
 
 # Cheap-charge defaults
 DEFAULT_CHEAP_HOURS = 6                   # charge during N cheapest hours of 24h

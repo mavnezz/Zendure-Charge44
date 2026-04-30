@@ -30,6 +30,7 @@ from .const import (
     DEFAULT_DEADZONE,
     DEFAULT_EFFICIENCY,
     DEFAULT_EXPENSIVE_HOURS,
+    DEFAULT_FALLBACK_DISCHARGE,
     DEFAULT_GRID_BIAS,
     DEFAULT_KP,
     DEFAULT_MAX_OUTPUT,
@@ -45,6 +46,7 @@ from .const import (
     EVENT_DRIFT_DETECTED,
     EVENT_TEMPERATURE_GUARD,
     MIN_PUBLISH_INTERVAL,
+    SAFETY_TICK_INTERVAL,
     SIGNAL_UPDATE,
     STALE_GRID_AFTER,
     TIBBER_POLL_INTERVAL,
@@ -88,6 +90,7 @@ class State:
     min_soc: int = DEFAULT_MIN_SOC
     kp: float = DEFAULT_KP
     deadzone: int = DEFAULT_DEADZONE
+    fallback_discharge: int = DEFAULT_FALLBACK_DISCHARGE
 
     # Cheap-charge state
     cheap_charge_enabled: bool = False
@@ -223,6 +226,17 @@ class Charge44Coordinator:
         self._unsubs.append(
             async_track_time_interval(
                 self.hass, self._periodic_evaluate, CHEAP_EVAL_INTERVAL
+            )
+        )
+
+        # Safety tick — Shelly silence detector. Even when no Shelly RPC
+        # arrives we need to fall back to the user-configured base load,
+        # otherwise outputLimit stays frozen at its last value forever.
+        self._unsubs.append(
+            async_track_time_interval(
+                self.hass,
+                self._periodic_safety,
+                timedelta(seconds=SAFETY_TICK_INTERVAL),
             )
         )
 
@@ -592,6 +606,32 @@ class Charge44Coordinator:
     @callback
     def _periodic_evaluate(self, _now) -> None:
         self._evaluate()
+
+    @callback
+    def _periodic_safety(self, _now) -> None:
+        """Detect Shelly silence and fall back to fallback_discharge.
+
+        _tick is only called when a Shelly RPC arrives. If the meter goes
+        silent — broker hiccup, Wi-Fi blip, malformed payload — outputLimit
+        gets stranded at whatever was last published, while real home load
+        keeps changing. This timer is the safety net.
+        """
+        if self.state.cheap_mode_active or not self.state.enabled:
+            return
+        if self.state.grid_power_ts == 0.0:
+            return  # never received Shelly data — let _tick handle it
+        if time.monotonic() - self.state.grid_power_ts <= STALE_GRID_AFTER:
+            return  # data is fresh, _tick is in charge
+        if self.state.temperature_guard in ("too_cold", "too_hot"):
+            return
+        if self.state.soc is not None and self.state.soc <= self.state.min_soc:
+            return
+        if self.state.smart_discharge_enabled and self.state.is_cheap_now:
+            return  # explicit "preserve battery" beats fallback
+        target = int(self.state.fallback_discharge)
+        if self._last_published != target:
+            self.state.setpoint = float(target)
+            self._publish_limit(target)
 
     def _evaluate(self) -> None:
         """Compute is_cheap_now / next_cheap_start, apply mode transitions."""

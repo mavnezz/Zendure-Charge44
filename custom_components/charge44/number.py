@@ -14,6 +14,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
+    DEFAULT_FALLBACK_DISCHARGE,
     DEFAULT_MIN_SOC,
     DEFAULT_MIN_SPREAD_CT,
     DEFAULT_TARGET_SOC,
@@ -70,6 +71,17 @@ NUMBERS: tuple[Charge44NumberDescription, ...] = (
         mode=NumberMode.SLIDER,
         state_key="min_spread_ct",
         default=DEFAULT_MIN_SPREAD_CT,
+    ),
+    Charge44NumberDescription(
+        key="fallback_discharge",
+        name="Fallback Discharge",
+        native_min_value=0,
+        native_max_value=400,
+        native_step=10,
+        native_unit_of_measurement="W",
+        mode=NumberMode.SLIDER,
+        state_key="fallback_discharge",
+        default=DEFAULT_FALLBACK_DISCHARGE,
     ),
     Charge44NumberDescription(
         key="temp_low_limit",
