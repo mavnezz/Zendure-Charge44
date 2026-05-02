@@ -26,6 +26,7 @@ ZENDURE_SENSORS = (
     "outputPackPower",
     "hyperTmp",
     "packState",
+    "packNum",
 )
 ZENDURE_NUMBERS = ("outputLimit", "inputLimit", "minSoc")
 
