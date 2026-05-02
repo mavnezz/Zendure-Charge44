@@ -461,7 +461,12 @@ class Charge44Coordinator:
         return 1.92
 
     def _update_battery_capacity(self, pack_num: int | None = None) -> None:
-        if self._battery_sns:
+        # Prefer SN-list summing only when it agrees with the live packNum.
+        # If they disagree, the user almost certainly added or removed a
+        # pack without re-running the config flow — trust packNum and fall
+        # back to the AB2000X default (1.92 kWh × n).
+        sn_count = len(self._battery_sns)
+        if sn_count and (pack_num is None or pack_num == sn_count):
             total = sum(self._pack_kwh(s) for s in self._battery_sns)
             if total > 0:
                 self.state.battery_capacity = round(total, 2)
