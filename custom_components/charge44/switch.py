@@ -4,6 +4,7 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -142,7 +143,7 @@ class Charge44SmartDischargeSwitch(Charge44Entity, SwitchEntity, RestoreEntity):
 
 
 class Charge44ContiguousBlockSwitch(Charge44Entity, SwitchEntity, RestoreEntity):
-    _attr_entity_category = "config"
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: Charge44Coordinator) -> None:
         super().__init__(coordinator, "contiguous_block", "Contiguous block mode")
