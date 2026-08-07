@@ -420,7 +420,8 @@ class Charge44Coordinator:
                 elif prop == "outputPackPower":
                     self.state.pack_input = float(raw)
                 elif prop == "hyperTmp":
-                    self.state.temperature = float(raw)
+                    # Device publishes Kelvin (e.g. 305.1), not °C.
+                    self.state.temperature = round(float(raw) - 273.15, 1)
                     self._update_temperature_guard()
                 elif prop == "packState":
                     self.state.pack_state = str(raw)

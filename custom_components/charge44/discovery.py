@@ -13,6 +13,9 @@ from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
+# Zendure publishes temperatures in Kelvin (e.g. 305.1 = 31.9 °C).
+_KELVIN_TO_C = "{{ (value | float - 273.15) | round(1) }}"
+
 
 def _main_device(sn: str) -> dict[str, Any]:
     return {
@@ -110,6 +113,8 @@ def _build_main(sn: str) -> list[tuple[str, str, dict[str, Any]]]:
             payload["state_class"] = state_class
         if diagnostic:
             payload["entity_category"] = "diagnostic"
+        if dev_class == "temperature":
+            payload["value_template"] = _KELVIN_TO_C
         out.append(("sensor", oid, payload))
 
     return out
@@ -134,6 +139,8 @@ def _build_battery(
             payload["device_class"] = dev_class
         if state_class:
             payload["state_class"] = state_class
+        if dev_class == "temperature":
+            payload["value_template"] = _KELVIN_TO_C
         out.append(("sensor", oid, payload))
     return out
 
