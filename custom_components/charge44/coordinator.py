@@ -58,7 +58,7 @@ from .const import (
     ZENDURE_NUMBERS,
     ZENDURE_SENSORS,
 )
-from .discovery import publish_zendure_discovery, remove_zendure_discovery
+from .discovery import clear_legacy_discovery, publish_zendure_discovery
 from .tibber_api import TibberApiClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -244,10 +244,12 @@ class Charge44Coordinator:
         # Auto-Discovery so the Zendure shows up as a native MQTT device in HA
         # (read-only — charge44 is the only writer).
         try:
-            # Clear any command-topic configs left over from older versions.
-            await remove_zendure_discovery(
-                self.hass, self.zendure_sn, self._battery_sns
-            )
+            # Clear only the obsolete v0.5.0 command-topic slots, then (re)publish
+            # the current configs. Republishing an unchanged retained config is a
+            # no-op for HA, so the mirror entities keep their state across a
+            # reload — unlike a remove-then-publish, which deletes them and leaves
+            # HA showing 'unavailable' until a restart.
+            await clear_legacy_discovery(self.hass, self.zendure_sn)
             await publish_zendure_discovery(
                 self.hass, self.zendure_sn, self._battery_sns
             )

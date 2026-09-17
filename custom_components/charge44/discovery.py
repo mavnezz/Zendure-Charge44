@@ -171,11 +171,46 @@ async def publish_zendure_discovery(
     )
 
 
+# Old v0.5.0 command-topic slots we no longer publish. Cleared on setup so a
+# migrated install doesn't keep stale writable entities around.
+_LEGACY_SLOTS: tuple[tuple[str, str], ...] = (
+    ("number", "output_limit"),
+    ("number", "input_limit"),
+    ("number", "min_soc"),
+    ("number", "soc_set"),
+    ("number", "inverse_max_power"),
+    ("select", "ac_mode"),
+    ("select", "grid_off_mode"),
+    ("select", "grid_reverse"),
+    ("switch", "smart_mode"),
+    ("switch", "lamp_switch"),
+)
+
+
+async def clear_legacy_discovery(hass: HomeAssistant, main_sn: str) -> None:
+    """Clear only the obsolete v0.5.0 command-topic slots.
+
+    Safe to call on every setup: publishing an empty payload to an already-empty
+    retained topic is a no-op, and it never touches the current entities — unlike
+    remove_zendure_discovery, which deletes them and leaves HA showing
+    'unavailable' until a restart.
+    """
+    node_id = f"zendure_{main_sn}"
+    for component, oid in _LEGACY_SLOTS:
+        await mqtt.async_publish(
+            hass, _config_topic(component, node_id, oid), "", qos=1, retain=True
+        )
+
+
 async def remove_zendure_discovery(
     hass: HomeAssistant,
     main_sn: str,
     battery_sns: Iterable[str] = (),
 ) -> None:
+    """Remove every discovery config — current entities and legacy slots.
+
+    Only for integration removal (async_remove_entry), never on reload.
+    """
     entries = _build_main(main_sn)
     for bat in battery_sns:
         entries.extend(_build_battery(bat, main_sn))
@@ -183,21 +218,5 @@ async def remove_zendure_discovery(
     for component, oid, _payload in entries:
         topic = _config_topic(component, node_id, oid)
         await mqtt.async_publish(hass, topic, "", qos=1, retain=True)
-    # Also clear the old v0.5.0 component slots we no longer publish.
-    legacy = [
-        ("number", "output_limit"),
-        ("number", "input_limit"),
-        ("number", "min_soc"),
-        ("number", "soc_set"),
-        ("number", "inverse_max_power"),
-        ("select", "ac_mode"),
-        ("select", "grid_off_mode"),
-        ("select", "grid_reverse"),
-        ("switch", "smart_mode"),
-        ("switch", "lamp_switch"),
-    ]
-    for component, oid in legacy:
-        await mqtt.async_publish(
-            hass, _config_topic(component, node_id, oid), "", qos=1, retain=True
-        )
+    await clear_legacy_discovery(hass, main_sn)
     _LOGGER.info("charge44: cleared Zendure discovery configs for %s", main_sn)
