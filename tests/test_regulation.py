@@ -23,6 +23,9 @@ def regulating(coord):
     coord.state.kp = 0.5
     coord.state.deadzone = 5
     coord.state.temperature_guard = "ok"
+    # A publish happened 10 s ago: past the 3 s rate-limit but well within the
+    # 45 s heartbeat window, so change-detection alone drives these tests.
+    coord._last_publish_ts = time.monotonic() - 10.0
     coord._publish_calls = []
     coord._publish_limit = lambda v: coord._publish_calls.append(v) or setattr(
         coord, "_last_published", v
@@ -202,3 +205,26 @@ def test_publish_emitted_outside_deadzone(regulating):
     regulating._last_published = 0
     regulating._tick()
     assert regulating._publish_calls == [50]  # 0 + 100*0.5 = 50, > deadzone
+
+
+# --- heartbeat: re-kick a silently-stalled device --------------------------
+
+def test_heartbeat_republishes_stable_setpoint(regulating):
+    """A stable setpoint that hasn't been published for HEARTBEAT_INTERVAL is
+    re-sent, so a Zendure stuck in standby gets a fresh command edge."""
+    regulating.state.setpoint = 200.0
+    regulating._last_published = 200
+    regulating.state.grid_power = 0.0  # error 0 → setpoint stays 200, no move
+    regulating._last_publish_ts = time.monotonic() - 100.0  # past heartbeat
+    regulating._tick()
+    assert regulating._publish_calls == [200]  # re-kicked despite no change
+
+
+def test_no_heartbeat_within_interval(regulating):
+    """Inside the heartbeat window a stable setpoint stays silent (deadzone)."""
+    regulating.state.setpoint = 200.0
+    regulating._last_published = 200
+    regulating.state.grid_power = 0.0
+    regulating._last_publish_ts = time.monotonic() - 10.0  # within window
+    regulating._tick()
+    assert regulating._publish_calls == []

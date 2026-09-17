@@ -45,6 +45,7 @@ from .const import (
     EVENT_CHEAP_CHARGE_STARTED,
     EVENT_DRIFT_DETECTED,
     EVENT_TEMPERATURE_GUARD,
+    HEARTBEAT_INTERVAL,
     MIN_PUBLISH_INTERVAL,
     SAFETY_TICK_INTERVAL,
     SIGNAL_UPDATE,
@@ -517,10 +518,17 @@ class Charge44Coordinator:
         now = time.monotonic()
         if now - self._last_publish_ts < MIN_PUBLISH_INTERVAL:
             return
-        if (
+        moved = (
             self._last_published is None
             or abs(new_int - self._last_published) > self.state.deadzone
-        ):
+        )
+        # Heartbeat: re-publish the standing setpoint periodically even when it
+        # hasn't moved. Without it the deadzone makes us go silent at a stable
+        # setpoint, so a Zendure that dropped to standby on its own never gets a
+        # fresh command edge to wake it (observed 2026-09-17: outputLimit pinned
+        # at max while the device output 0 W and the house imported from grid).
+        stale = now - self._last_publish_ts >= HEARTBEAT_INTERVAL
+        if moved or stale:
             self._publish_limit(new_int)
 
     def _publish_limit(self, value: int) -> None:
@@ -635,7 +643,8 @@ class Charge44Coordinator:
         if self.state.smart_discharge_enabled and self.state.is_cheap_now:
             return  # explicit "preserve battery" beats fallback
         target = int(self.state.fallback_discharge)
-        if self._last_published != target:
+        stale = time.monotonic() - self._last_publish_ts >= HEARTBEAT_INTERVAL
+        if self._last_published != target or stale:
             self.state.setpoint = float(target)
             self._publish_limit(target)
 

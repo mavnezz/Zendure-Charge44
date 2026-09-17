@@ -19,10 +19,12 @@ def safety(coord):
     coord.state.min_soc = 10
     coord.state.fallback_discharge = 150
     coord.state.temperature_guard = "ok"
+    # Recent publish so the heartbeat doesn't fire in change-detection tests.
+    coord._last_publish_ts = time.monotonic() - 10.0
     coord._publish_calls = []
     coord._publish_limit = lambda v: coord._publish_calls.append(v) or setattr(
         coord, "_last_published", v
-    )
+    ) or setattr(coord, "_last_publish_ts", time.monotonic())
     return coord
 
 
@@ -107,3 +109,15 @@ def test_zero_fallback_means_idle(safety):
     safety._last_published = 200
     safety._periodic_safety(None)
     assert safety._publish_calls == [0]
+
+
+# --- heartbeat during a stale-grid fallback --------------------------------
+
+def test_heartbeat_republishes_fallback_when_stalled(safety):
+    """Already at the fallback value, but it hasn't been (re)published for
+    HEARTBEAT_INTERVAL — re-send it so a hung device is re-kicked."""
+    safety.state.grid_power_ts = time.monotonic() - 30
+    safety._last_published = 150  # already at fallback
+    safety._last_publish_ts = time.monotonic() - 100.0  # past heartbeat
+    safety._periodic_safety(None)
+    assert safety._publish_calls == [150]

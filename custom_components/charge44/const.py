@@ -37,6 +37,10 @@ DEFAULT_MIN_SOC = 10           # %, stop discharging below this
 DEFAULT_KP = 0.5               # P-controller gain
 DEFAULT_DEADZONE = 5           # W, don't republish changes smaller than this
 MIN_PUBLISH_INTERVAL = 3.0     # s, rate limit between outputLimit writes
+HEARTBEAT_INTERVAL = 45.0      # s, re-publish the standing outputLimit even when
+                               # unchanged — a Zendure that silently drops to
+                               # standby needs a fresh command edge to wake up,
+                               # and the deadzone otherwise makes us go silent
 STALE_GRID_AFTER = 15.0        # s, pause regulation if no fresh Shelly reading
 SAFETY_TICK_INTERVAL = 10.0    # s, how often to check for Shelly silence
 DEFAULT_FALLBACK_DISCHARGE = 0  # W, outputLimit when Shelly stops reporting
