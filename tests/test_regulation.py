@@ -228,3 +228,54 @@ def test_no_heartbeat_within_interval(regulating):
     regulating._last_publish_ts = time.monotonic() - 10.0  # within window
     regulating._tick()
     assert regulating._publish_calls == []
+
+
+# --- acMode self-healing ----------------------------------------------------
+
+def _track_acmode(coord):
+    coord._ac_calls = []
+    coord._publish_ac_mode = lambda v: coord._ac_calls.append(v)
+    return coord
+
+
+def test_stuck_input_mode_forced_to_output(regulating):
+    """A leftover 'Input mode' from cheap-charge makes outputLimit a no-op, so
+    the regulation tick must force the device back to Output mode."""
+    _track_acmode(regulating)
+    regulating.state.ac_mode = "Input mode"
+    regulating.state.grid_power = 200.0
+    regulating._tick()
+    assert regulating._ac_calls == ["Output mode"]
+
+
+def test_output_mode_not_republished(regulating):
+    _track_acmode(regulating)
+    regulating.state.ac_mode = "Output mode"
+    regulating.state.grid_power = 200.0
+    regulating._tick()
+    assert regulating._ac_calls == []
+
+
+def test_unknown_acmode_left_untouched(regulating):
+    """Before the first acMode status arrives we don't guess."""
+    _track_acmode(regulating)
+    regulating.state.ac_mode = None
+    regulating.state.grid_power = 200.0
+    regulating._tick()
+    assert regulating._ac_calls == []
+
+
+def test_cheap_mode_does_not_fight_input_mode(regulating):
+    """While grid-charging the device is meant to be in Input mode."""
+    _track_acmode(regulating)
+    regulating.state.cheap_mode_active = True
+    regulating.state.ac_mode = "Input mode"
+    regulating._tick()
+    assert regulating._ac_calls == []
+
+
+def test_acmode_status_tracked_from_mqtt(coord):
+    coord._update_zendure("select", "acMode", "Input mode")
+    assert coord.state.ac_mode == "Input mode"
+    coord._update_zendure("select", "acMode", "Output mode")
+    assert coord.state.ac_mode == "Output mode"

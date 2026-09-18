@@ -53,9 +53,11 @@ from .const import (
     TIBBER_POLL_INTERVAL,
     TOPIC_SHELLY_RPC,
     TOPIC_ZENDURE_NUMBER,
+    TOPIC_ZENDURE_SELECT,
     TOPIC_ZENDURE_SENSOR,
     TOPIC_ZENDURE_WRITE,
     ZENDURE_NUMBERS,
+    ZENDURE_SELECTS,
     ZENDURE_SENSORS,
 )
 from .discovery import clear_legacy_discovery, publish_zendure_discovery
@@ -81,6 +83,7 @@ class State:
     pack_input: float | None = None
     pack_output: float | None = None
     pack_state: str | None = None
+    ac_mode: str | None = None  # device mirror: "Output mode" | "Input mode"
     temperature: float | None = None
 
     # Regulation state
@@ -180,6 +183,7 @@ class Charge44Coordinator:
         self._last_published: int | None = None
         self._last_publish_ts: float = 0.0
         self._last_energy_ts: float = 0.0
+        self._acmode_forced: bool = False
         self._tibber: TibberApiClient | None = None
         # Seed battery capacity from known battery SNs before the first MQTT msg.
         self._update_battery_capacity()
@@ -207,6 +211,14 @@ class Charge44Coordinator:
                     self.hass,
                     TOPIC_ZENDURE_NUMBER.format(sn=self.zendure_sn, prop=prop),
                     self._make_zendure_handler("number", prop),
+                )
+            )
+        for prop in ZENDURE_SELECTS:
+            self._unsubs.append(
+                await mqtt.async_subscribe(
+                    self.hass,
+                    TOPIC_ZENDURE_SELECT.format(sn=self.zendure_sn, prop=prop),
+                    self._make_zendure_handler("select", prop),
                 )
             )
 
@@ -441,6 +453,9 @@ class Charge44Coordinator:
                     value = int(float(raw))
                     if value > 0:
                         self.state.max_output = value
+            elif kind == "select":
+                if prop == "acMode":
+                    self.state.ac_mode = str(raw)
             self._notify()
         except (ValueError, TypeError) as err:
             _LOGGER.debug("Zendure parse error %s=%s: %s", prop, raw, err)
@@ -490,6 +505,9 @@ class Charge44Coordinator:
         if time.monotonic() - self.state.grid_power_ts > STALE_GRID_AFTER:
             _LOGGER.warning("charge44: Shelly data stale, pausing regulation")
             return
+        # Past the cheap_mode_active guard above we are regulating output, so the
+        # device must be in Output mode. Self-heal a stuck acMode (see method).
+        self._ensure_output_mode()
         if self.state.temperature_guard in ("too_cold", "too_hot"):
             # Safety: freeze output on temperature excursion.
             if self.state.setpoint != 0.0:
@@ -532,6 +550,30 @@ class Charge44Coordinator:
         stale = now - self._last_publish_ts >= HEARTBEAT_INTERVAL
         if moved or stale:
             self._publish_limit(new_int)
+
+    def _ensure_output_mode(self) -> None:
+        """Self-heal a stuck acMode.
+
+        A cheap-charge cycle switches the device to "Input mode". If the exit's
+        acMode revert is dropped by the device (observed 2026-09-18), the device
+        stays in Input mode and silently ignores every outputLimit command — it
+        sits in standby with no output and curtails PV (nowhere for it to go),
+        while the house imports from grid. Whenever we're actively regulating
+        output (we are past the cheap_mode_active guard in _tick), force the
+        device back to Output mode until its status mirror confirms the change.
+        """
+        if self.state.ac_mode in (None, AC_MODE_OUTPUT):
+            self._acmode_forced = False
+            return
+        if not getattr(self, "_acmode_forced", False):
+            _LOGGER.warning(
+                "charge44: device in %s while regulating output — forcing %s "
+                "(stale cheap-charge state was making outputLimit a no-op)",
+                self.state.ac_mode,
+                AC_MODE_OUTPUT,
+            )
+            self._acmode_forced = True
+        self._publish_ac_mode(AC_MODE_OUTPUT)
 
     def _publish_limit(self, value: int) -> None:
         topic = TOPIC_ZENDURE_WRITE.format(

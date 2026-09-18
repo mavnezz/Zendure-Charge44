@@ -12,6 +12,7 @@ CONF_FORECAST_ENTITY = "forecast_entity"
 # Zendure topic patterns (state topics; append "/set" for commands)
 TOPIC_ZENDURE_SENSOR = "Zendure/sensor/{sn}/{prop}"
 TOPIC_ZENDURE_NUMBER = "Zendure/number/{sn}/{prop}"
+TOPIC_ZENDURE_SELECT = "Zendure/select/{sn}/{prop}"
 TOPIC_ZENDURE_WRITE = "Zendure/{kind}/{sn}/{prop}/set"
 
 # Shelly Pro 3EM publishes a NotifyStatus JSON to this topic ~every 5s
@@ -29,6 +30,7 @@ ZENDURE_SENSORS = (
     "packNum",
 )
 ZENDURE_NUMBERS = ("outputLimit", "inputLimit", "minSoc")
+ZENDURE_SELECTS = ("acMode",)
 
 # Hardware / regulation defaults
 DEFAULT_MAX_OUTPUT = 800       # W, Zendure 800 Pro hardware ceiling
