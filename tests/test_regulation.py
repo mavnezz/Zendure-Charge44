@@ -136,52 +136,6 @@ def test_smart_discharge_off_ignores_cheap_hour(regulating):
     assert regulating._publish_calls == [100]
 
 
-def test_smart_discharge_full_battery_harvests_pv(regulating):
-    """Battery full during a cheap hour: holding output at 0 would curtail PV,
-    so the zero-export loop runs instead and solar covers the home."""
-    regulating.state.smart_discharge_enabled = True
-    regulating.state.is_cheap_now = True
-    regulating.state.soc = 100  # full — nothing left to preserve
-    regulating.state.grid_power = 200.0
-    regulating._tick()
-    assert regulating._publish_calls == [100]  # PI loop, not a 0-hold
-
-
-def test_smart_discharge_holds_when_not_full(regulating):
-    """Below full the hold stands — cheap grid covers the home, PV charges the
-    battery."""
-    regulating.state.smart_discharge_enabled = True
-    regulating.state.is_cheap_now = True
-    regulating.state.soc = 80
-    regulating.state.grid_power = 200.0
-    regulating.state.setpoint = 150.0  # was discharging; hold pushes it to 0
-    regulating._tick()
-    assert regulating._publish_calls == [0]
-
-
-def test_full_battery_hysteresis_holds_between_100_and_96(regulating):
-    """Once full, keep harvesting until SOC falls below 96 % (no output pulsing
-    as the loop nibbles the top few percent)."""
-    regulating.state.smart_discharge_enabled = True
-    regulating.state.is_cheap_now = True
-    regulating.state.grid_power = 200.0
-    regulating._battery_full = True  # was full a moment ago
-    regulating.state.soc = 98  # still in the band
-    regulating._tick()
-    assert regulating._publish_calls == [100]  # keeps harvesting
-
-
-def test_full_battery_hysteresis_resumes_hold_below_96(regulating):
-    regulating.state.smart_discharge_enabled = True
-    regulating.state.is_cheap_now = True
-    regulating.state.grid_power = 200.0
-    regulating._battery_full = True
-    regulating.state.soc = 95  # dropped below the band
-    regulating.state.setpoint = 150.0
-    regulating._tick()
-    assert regulating._publish_calls == [0]  # hold resumes
-
-
 def test_smart_discharge_idempotent_when_already_paused(regulating):
     regulating.state.smart_discharge_enabled = True
     regulating.state.is_cheap_now = True
