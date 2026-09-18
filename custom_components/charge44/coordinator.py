@@ -184,6 +184,7 @@ class Charge44Coordinator:
         self._last_publish_ts: float = 0.0
         self._last_energy_ts: float = 0.0
         self._acmode_forced: bool = False
+        self._battery_full: bool = False
         self._tibber: TibberApiClient | None = None
         # Seed battery capacity from known battery SNs before the first MQTT msg.
         self._update_battery_capacity()
@@ -519,11 +520,23 @@ class Charge44Coordinator:
             self._publish_limit(0)
             return
 
-        # Smart-discharge: when enabled, suspend the loop during the cheapest
-        # hours so the battery is preserved for normal/expensive hours. Cheap
-        # grid covers the home directly. Otherwise we always run the zero-
-        # export PI loop below — the battery covers the home, never exports.
-        if self.state.smart_discharge_enabled and self.state.is_cheap_now:
+        # Smart-discharge: during the cheapest hours, preserve the battery so
+        # cheap grid covers the home directly (with a zero feed-in tariff,
+        # exporting is loss). BUT only while the battery still has room to store
+        # PV — once it is full, holding output at 0 curtails solar (a full
+        # battery + parked inverter leaves PV no sink), so we hand back to the
+        # zero-export loop below and let solar cover the home instead. Hysteresis
+        # (full at 100 %, resume holding below 96 %) keeps the output from
+        # pulsing as the loop nibbles the top few percent.
+        if self.state.soc >= 100:
+            self._battery_full = True
+        elif self.state.soc < 96:
+            self._battery_full = False
+        if (
+            self.state.smart_discharge_enabled
+            and self.state.is_cheap_now
+            and not getattr(self, "_battery_full", False)
+        ):
             if self._last_published not in (0, None) or self.state.setpoint != 0.0:
                 self.state.setpoint = 0.0
                 self._publish_limit(0)
