@@ -27,12 +27,32 @@ def _main_device(sn: str) -> dict[str, Any]:
     }
 
 
+def pack_info(sn: str) -> tuple[str, float]:
+    """(model, kWh) of a battery pack from its serial prefix (zendure-ha
+    convention)."""
+    head = sn[0] if sn else ""
+    sub = sn[3] if len(sn) > 3 else ""
+    if head == "A":
+        return ("Battery pack 2.4 kWh", 2.4) if sub == "3" else ("AB1000", 0.96)
+    if head == "B":
+        return "AB1000", 0.96
+    if head == "C":
+        return "AB2000", 1.92  # AB2000X / AB2000S
+    if head == "F":
+        return "AB3000", 2.88
+    if head == "G":
+        return "AB3000L", 2.88
+    if head == "J":
+        return "Battery pack 2.4 kWh", 2.4
+    return "Battery pack", 1.92
+
+
 def _battery_device(sn: str, main_sn: str) -> dict[str, Any]:
     return {
         "identifiers": [f"zendure_{sn}"],
         "name": f"Zendure Battery Pack {sn[-5:]}",
         "manufacturer": "Zendure",
-        "model": "AB2000X",
+        "model": pack_info(sn)[0],
         "serial_number": sn,
         "via_device": f"zendure_{main_sn}",
     }
@@ -93,6 +113,13 @@ BATTERY_SENSORS: tuple[
 )
 
 
+def _entity_id(sn: str, oid: str) -> str:
+    # default_entity_id (HA 2025.10+) replaces the deprecated object_id and
+    # wants the full, lowercase "domain.object_id". It only seeds new
+    # entities — existing ones keep their registry ID via unique_id.
+    return f"sensor.zendure_{sn.lower()}_{oid}"
+
+
 def _build_main(sn: str) -> list[tuple[str, str, dict[str, Any]]]:
     device = _main_device(sn)
     out: list[tuple[str, str, dict[str, Any]]] = []
@@ -101,7 +128,7 @@ def _build_main(sn: str) -> list[tuple[str, str, dict[str, Any]]]:
         payload: dict[str, Any] = {
             "name": name,
             "unique_id": f"zendure_{sn}_{oid}",
-            "object_id": f"zendure_{sn}_{oid}",
+            "default_entity_id": _entity_id(sn, oid),
             "state_topic": f"Zendure/{kind}/{sn}/{prop}",
             "device": device,
         }
@@ -129,7 +156,7 @@ def _build_battery(
         payload: dict[str, Any] = {
             "name": name,
             "unique_id": f"zendure_{sn}_{oid}",
-            "object_id": f"zendure_{sn}_{oid}",
+            "default_entity_id": _entity_id(sn, oid),
             "state_topic": f"Zendure/sensor/{sn}/{sn}_{suffix}",
             "device": device,
         }

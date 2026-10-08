@@ -5,7 +5,7 @@ from typing import Any
 
 import aiohttp
 
-from .const import TIBBER_API_ENDPOINT
+from .const import TIBBER_API_ENDPOINT, TIBBER_TIMEOUT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,7 +72,10 @@ class TibberApiClient:
         }
         try:
             async with self._session.post(
-                TIBBER_API_ENDPOINT, json={"query": query}, headers=headers
+                TIBBER_API_ENDPOINT,
+                json={"query": query},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=TIBBER_TIMEOUT),
             ) as resp:
                 if resp.status != 200:
                     _LOGGER.warning("Tibber API HTTP %s", resp.status)
@@ -82,8 +85,9 @@ class TibberApiClient:
                     _LOGGER.warning("Tibber GraphQL errors: %s", body["errors"])
                     return None
                 return body.get("data")
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("Tibber connection error: %s", err)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            # ValueError: a non-JSON body (e.g. an HTML error page).
+            _LOGGER.warning("Tibber connection error: %r", err)
             return None
 
     async def async_get_homes(self) -> list[dict[str, Any]]:

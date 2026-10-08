@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable
 
 from homeassistant.components.sensor import (
@@ -24,6 +25,7 @@ from .entity import Charge44Entity
 class Charge44SensorDescription(SensorEntityDescription):
     value_fn: Callable[[State], Any]
     attrs_fn: Callable[[State], dict[str, Any]] | None = None
+    daily: bool = False  # resets at local midnight (sets last_reset)
 
 
 SENSORS: tuple[Charge44SensorDescription, ...] = (
@@ -233,6 +235,14 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=2,
         value_fn=lambda s: s.spread_now_ct,
+        attrs_fn=lambda s: (
+            {
+                "reference_price_ct": s.reference_price_ct,
+                "reference_hours": s.reference_hours,
+            }
+            if s.reference_price_ct is not None
+            else {}
+        ),
     ),
     Charge44SensorDescription(
         key="required_spread_ct",
@@ -264,26 +274,15 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda s: s.drift_count,
     ),
-    # Cost / savings
-    Charge44SensorDescription(
-        key="cost_charged_today_eur",
-        name="Cost charged today",
-        native_unit_of_measurement="EUR",
-        suggested_display_precision=3,
-        value_fn=lambda s: round(s.cost_charged_today_eur, 3),
-    ),
-    Charge44SensorDescription(
-        key="value_discharged_today_eur",
-        name="Discharge value today",
-        native_unit_of_measurement="EUR",
-        suggested_display_precision=3,
-        value_fn=lambda s: round(s.value_discharged_today_eur, 3),
-    ),
+    # Savings (derived from the restored EUR counters below)
     Charge44SensorDescription(
         key="savings_today_eur",
         name="Savings today",
         native_unit_of_measurement="EUR",
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
         suggested_display_precision=3,
+        daily=True,
         value_fn=lambda s: round(
             s.value_discharged_today_eur - s.cost_charged_today_eur, 3
         ),
@@ -292,6 +291,8 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
         key="savings_total_eur",
         name="Savings total",
         native_unit_of_measurement="EUR",
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
         suggested_display_precision=3,
         value_fn=lambda s: round(
             s.value_discharged_total_eur - s.cost_charged_total_eur, 3
@@ -308,9 +309,12 @@ ENERGY_SENSORS: tuple[tuple[str, str, str], ...] = (
 )
 
 # RestoreSensor-backed EUR counters (persisted across restarts).
-COST_SENSORS: tuple[tuple[str, str, str], ...] = (
-    ("cost_charged_total_eur", "Cost charged total", "cost_charged_total_eur"),
-    ("value_discharged_total_eur", "Discharge value total", "value_discharged_total_eur"),
+# (key, name, state_key, daily)
+COST_SENSORS: tuple[tuple[str, str, str, bool], ...] = (
+    ("cost_charged_today_eur", "Cost charged today", "cost_charged_today_eur", True),
+    ("value_discharged_today_eur", "Discharge value today", "value_discharged_today_eur", True),
+    ("cost_charged_total_eur", "Cost charged total", "cost_charged_total_eur", False),
+    ("value_discharged_total_eur", "Discharge value total", "value_discharged_total_eur", False),
 )
 
 
@@ -326,14 +330,17 @@ async def async_setup_entry(
         for key, name, state_key in ENERGY_SENSORS
     )
     entities.extend(
-        Charge44CostSensor(coordinator, key, name, state_key)
-        for key, name, state_key in COST_SENSORS
+        Charge44CostSensor(coordinator, key, name, state_key, daily)
+        for key, name, state_key, daily in COST_SENSORS
     )
+    entities.append(Charge44HouseLoadSensor(coordinator))
     async_add_entities(entities)
 
 
 class Charge44Sensor(Charge44Entity, SensorEntity):
     entity_description: Charge44SensorDescription
+    # The 96-slot price list is for dashboard cards, not for the database.
+    _unrecorded_attributes = frozenset({"prices_24h"})
 
     def __init__(
         self, coordinator: Charge44Coordinator, description: Charge44SensorDescription
@@ -350,6 +357,12 @@ class Charge44Sensor(Charge44Entity, SensorEntity):
         if self.entity_description.attrs_fn is None:
             return None
         return self.entity_description.attrs_fn(self.coordinator.state)
+
+    @property
+    def last_reset(self) -> datetime | None:
+        if self.entity_description.daily:
+            return self.coordinator.today_start()
+        return None
 
 
 class Charge44EnergySensor(Charge44Entity, RestoreSensor):
@@ -392,8 +405,11 @@ class Charge44EnergySensor(Charge44Entity, RestoreSensor):
 
 
 class Charge44CostSensor(Charge44Entity, RestoreSensor):
-    """Persisted cumulative EUR counter (no state_class — not a meter)."""
+    """Persisted EUR counter. Daily counters restore only a value from today,
+    so a restart no longer zeroes them mid-day."""
 
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
     _attr_native_unit_of_measurement = "EUR"
     _attr_suggested_display_precision = 3
 
@@ -403,23 +419,61 @@ class Charge44CostSensor(Charge44Entity, RestoreSensor):
         key: str,
         name: str,
         state_key: str,
+        daily: bool,
     ) -> None:
         super().__init__(coordinator, key, name)
         self._state_key = state_key
+        self._daily = daily
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_sensor_data()
+        if last is None or last.native_value is None:
+            return
+        try:
+            value = float(last.native_value)
+        except (ValueError, TypeError):
+            return
+        if not self._daily:
+            setattr(self.coordinator.state, self._state_key, value)
+            return
+        last_state = await self.async_get_last_state()
+        if last_state is not None:
+            self.coordinator.restore_daily_counter(
+                self._state_key, value, last_state.last_updated
+            )
+
+    @property
+    def native_value(self) -> Any:
+        return round(getattr(self.coordinator.state, self._state_key, 0.0), 3)
+
+    @property
+    def last_reset(self) -> datetime | None:
+        return self.coordinator.today_start() if self._daily else None
+
+
+class Charge44HouseLoadSensor(Charge44Entity, RestoreSensor):
+    """Moving average of the house load. Persisted so the discharge horizon
+    used by the profitability check survives a restart."""
+
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_suggested_display_precision = 0
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: Charge44Coordinator) -> None:
+        super().__init__(coordinator, "house_load_avg", "House load average")
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_sensor_data()
         if last is not None and last.native_value is not None:
             try:
-                setattr(
-                    self.coordinator.state,
-                    self._state_key,
-                    float(last.native_value),
-                )
+                self.coordinator.restore_house_load(float(last.native_value))
             except (ValueError, TypeError):
                 pass
 
     @property
     def native_value(self) -> Any:
-        return round(getattr(self.coordinator.state, self._state_key, 0.0), 3)
+        return self.coordinator.state.house_load_avg_w

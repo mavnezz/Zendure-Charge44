@@ -19,7 +19,11 @@
         "description": "Tibber-API-Token für preisbasiertes Laden. Solar-Forecast-Sensor wählen — dann wird Netzladen übersprungen wenn die Sonne den Akku eh füllt. Beides optional.",
         "data": {
           "tibber_token": "Tibber-API-Token",
-          "forecast_entity": "Solar-Prognose-Sensor (verbleibend heute, kWh)"
+          "forecast_entity": "Solar-Prognose-Sensor (verbleibend heute, kWh)",
+          "forecast_tomorrow_entity": "Solar-Prognose-Sensor (morgen, kWh — optional)"
+        },
+        "data_description": {
+          "forecast_tomorrow_entity": "Wird abends genutzt, wenn heute keine PV mehr kommt: Ein günstiger Slot vor Mitternacht prüft dann die Sonne von morgen, statt aus dem Netz zu laden."
         }
       },
       "tibber_home": {
@@ -44,7 +48,11 @@
         "description": "Tibber-Token oder Solar-Prognose-Sensor ändern. Leerer Token deaktiviert Cheap-Charge.",
         "data": {
           "tibber_token": "Tibber-API-Token",
-          "forecast_entity": "Solar-Prognose-Sensor"
+          "forecast_entity": "Solar-Prognose-Sensor",
+          "forecast_tomorrow_entity": "Solar-Prognose-Sensor (morgen)"
+        },
+        "data_description": {
+          "forecast_tomorrow_entity": "Wird abends genutzt, wenn heute keine PV mehr kommt: Ein günstiger Slot vor Mitternacht prüft dann die Sonne von morgen, statt aus dem Netz zu laden."
         }
       },
       "pick_home": {

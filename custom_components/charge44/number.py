@@ -21,6 +21,7 @@ from .const import (
     DEFAULT_TEMP_HIGH,
     DEFAULT_TEMP_LOW,
     DOMAIN,
+    TARGET_SOC_MIN,
 )
 from .coordinator import Charge44Coordinator
 from .entity import Charge44Entity
@@ -42,7 +43,7 @@ NUMBERS: tuple[Charge44NumberDescription, ...] = (
     Charge44NumberDescription(
         key="target_soc",
         name="SOC Max",
-        native_min_value=51,
+        native_min_value=TARGET_SOC_MIN,
         native_max_value=100,
         native_step=1,
         native_unit_of_measurement=PERCENTAGE,
@@ -120,6 +121,9 @@ async def async_setup_entry(
 
 
 class Charge44Number(Charge44Entity, NumberEntity, RestoreEntity):
+    """Slider backed by coordinator state, so a change made elsewhere (e.g. the
+    set_target_soc service) shows up here and is what gets restored."""
+
     entity_description: Charge44NumberDescription
 
     def __init__(
@@ -127,21 +131,25 @@ class Charge44Number(Charge44Entity, NumberEntity, RestoreEntity):
     ) -> None:
         super().__init__(coordinator, description.key, description.name)
         self.entity_description = description
-        self._attr_native_value = description.default
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        value: float = self.entity_description.default
         last = await self.async_get_last_state()
         if last is not None and last.state not in (None, "unknown", "unavailable"):
             try:
-                self._attr_native_value = float(last.state)
+                value = float(last.state)
             except ValueError:
                 pass
-        self.coordinator.set_setting(
-            self.entity_description.state_key, self._attr_native_value
+        value = max(
+            self.entity_description.native_min_value,
+            min(self.entity_description.native_max_value, value),
         )
+        self.coordinator.set_setting(self.entity_description.state_key, value)
+
+    @property
+    def native_value(self) -> float:
+        return getattr(self.coordinator.state, self.entity_description.state_key)
 
     async def async_set_native_value(self, value: float) -> None:
-        self._attr_native_value = value
         self.coordinator.set_setting(self.entity_description.state_key, value)
-        self.async_write_ha_state()

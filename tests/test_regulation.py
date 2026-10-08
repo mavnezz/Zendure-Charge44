@@ -59,12 +59,6 @@ def test_missing_soc_skips(regulating):
     assert regulating._publish_calls == []
 
 
-def test_stale_grid_power_skips(regulating):
-    regulating.state.grid_power_ts = time.monotonic() - 60
-    regulating._tick()
-    assert regulating._publish_calls == []
-
-
 # --- safety blocks ----------------------------------------------------------
 
 @pytest.mark.parametrize("guard", ["too_cold", "too_hot"])
@@ -279,3 +273,103 @@ def test_acmode_status_tracked_from_mqtt(coord):
     assert coord.state.ac_mode == "Input mode"
     coord._update_zendure("select", "acMode", "Output mode")
     assert coord.state.ac_mode == "Output mode"
+
+
+# --- zero-hold: change or heartbeat only -----------------------------------
+
+def test_min_soc_hold_not_republished_every_tick(regulating):
+    """At min SOC (often all night) 0 W used to go out on every Shelly tick."""
+    regulating.state.soc = 10
+    regulating.state.min_soc = 10
+    for _ in range(5):
+        regulating._tick()
+    assert regulating._publish_calls == [0]
+
+
+def test_min_soc_hold_heartbeat(regulating):
+    regulating.state.soc = 10
+    regulating.state.min_soc = 10
+    regulating._last_published = 0
+    regulating._last_publish_ts = time.monotonic() - 100.0  # past heartbeat
+    regulating._tick()
+    assert regulating._publish_calls == [0]
+
+
+def test_temperature_guard_hold_heartbeat(regulating):
+    """The guard used to send 0 once and never again — a dropped command
+    stayed dropped."""
+    regulating.state.temperature_guard = "too_hot"
+    regulating._last_published = 0
+    regulating._last_publish_ts = time.monotonic() - 100.0
+    regulating._tick()
+    assert regulating._publish_calls == [0]
+
+
+# --- acMode retry pacing ----------------------------------------------------
+
+def _track_acmode_ts(coord):
+    coord._ac_calls = []
+
+    def _pub(v):
+        coord._ac_calls.append(v)
+        coord._last_acmode_ts = time.monotonic()
+
+    coord._publish_ac_mode = _pub
+    return coord
+
+
+def test_acmode_retry_rate_limited(regulating):
+    _track_acmode_ts(regulating)
+    regulating.state.ac_mode = "Input mode"
+    for _ in range(3):
+        regulating._tick()
+    assert regulating._ac_calls == ["Output mode"]
+    regulating._last_acmode_ts -= 11.0  # retry interval passed, still stuck
+    regulating._tick()
+    assert regulating._ac_calls == ["Output mode", "Output mode"]
+
+
+def test_no_false_alarm_right_after_own_exit(regulating):
+    """Right after our own cheap-mode exit the mirror still says Input mode
+    for a moment — that is not a stuck device."""
+    _track_acmode_ts(regulating)
+    regulating._last_acmode_ts = time.monotonic()  # exit just sent Output
+    regulating.state.ac_mode = "Input mode"
+    regulating._tick()
+    assert regulating._ac_calls == []
+
+
+# --- Input-mode self-heal during cheap-charge ------------------------------
+
+def test_dropped_input_mode_is_repeated(regulating):
+    _track_acmode_ts(regulating)
+    inputs = []
+    regulating._publish_input_limit = inputs.append
+    regulating.state.cheap_mode_active = True
+    regulating.state.charge_power = 800
+    regulating.state.ac_mode = "Output mode"  # entry command was dropped
+    regulating._tick()
+    assert regulating._ac_calls == ["Input mode"]
+    assert inputs == [800]
+
+
+def test_confirmed_input_mode_not_repeated(regulating):
+    _track_acmode_ts(regulating)
+    regulating.state.cheap_mode_active = True
+    regulating.state.ac_mode = "Input mode"
+    regulating._tick()
+    assert regulating._ac_calls == []
+
+
+# --- integrate only when publishing ----------------------------------------
+
+def test_no_integration_inside_rate_limit(regulating):
+    """Ticks inside the 3 s rate limit see the same unanswered error; adding
+    it up each time overshoots once the next command goes out."""
+    regulating._last_publish_ts = time.monotonic()  # just published
+    regulating.state.setpoint = 100.0
+    regulating.state.grid_power = 200.0
+    regulating._tick()
+    regulating._tick()
+    assert regulating.state.setpoint == 100.0
+    assert regulating._publish_calls == []

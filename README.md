@@ -15,10 +15,10 @@ No cloud, no middleware — speaks directly to your local MQTT broker.
 Reads live grid power from the Shelly 3EM Pro and adjusts the Zendure's `outputLimit` to keep the net flow near a configurable target (default 0 W).
 
 ### 2. Price-based grid charging (Cheap-Charge)
-With a Tibber API token, the plugin pulls the next 24 h of prices. During the N cheapest hours it switches the Zendure to **Input mode** and pulls power through `inputLimit` — but only if the spread between the current price and the day's max covers round-trip losses.
+With a Tibber API token, the plugin pulls the next 24 h of prices. During the N cheapest hours it switches the Zendure to **Input mode** and pulls power through `inputLimit` — but only if the current price sits far enough below the prices the stored energy will actually displace to cover round-trip losses.
 
 ### 3. Solar-forecast smart skip
-If the `forecast_solar` integration is installed, the plugin compares expected remaining production to the kWh still needed to reach target SOC. **If the sun alone will fill the battery, no grid charging happens — even during a cheap window.**
+If the `forecast_solar` integration is installed, the plugin compares expected remaining production to the kWh still needed to reach target SOC. **If the sun alone will fill the battery, no grid charging happens — even during a cheap window.** With an optional *tomorrow* forecast sensor, a cheap slot in the evening (after today's PV is done) checks tomorrow's sun instead.
 
 ### 4. Free-Charge / Manual-Charge / Smart-Discharge
 - **Free-Charge** — auto-charges whenever the current price is ≤ 0 ct/kWh, ignoring solar forecast and cheap-window logic.
@@ -52,8 +52,12 @@ Copy `custom_components/charge44/` into `<HA_config>/custom_components/charge44/
 Three steps in the config flow:
 
 1. **Devices** — the plugin scans MQTT for 3 seconds and offers detected Zendure SNs and Shelly IDs as dropdowns. Manual entry stays available if your devices don't auto-detect.
-2. **Tibber + solar forecast** (both optional) — paste the API token, pick the solar sensor. Leave blank if you only want zero-export regulation.
+2. **Tibber + solar forecast** (all optional) — paste the API token, pick the solar sensor for *remaining today* and, optionally, the one for *tomorrow* (Forecast.Solar: `energy_production_tomorrow`). Leave blank if you only want zero-export regulation.
 3. **Tibber home** — only shown when the account has multiple homes.
+
+Token, home and forecast sensors can be changed later via **Configure** (options flow).
+
+Requires Home Assistant **2025.10** or newer.
 
 ## Entities
 
@@ -76,15 +80,19 @@ Three steps in the config flow:
 | `sensor.charge44_solar_forecast_remaining` | kWh of solar left today |
 | `sensor.charge44_grid_charge_needed` | shortfall vs target SOC |
 | `sensor.charge44_today_min_price` / `_max_price` | day min/max (ct/kWh) |
-| `sensor.charge44_spread_now` | today's max minus current |
+| `sensor.charge44_spread_now` | reference price minus current (attributes: `reference_price_ct`, `reference_hours`) |
 | `sensor.charge44_required_spread` | required spread (min-spread vs break-even) |
 | `sensor.charge44_charge_profitable` | "yes"/"no" — would charging pay off |
+| `sensor.charge44_house_load_average` | moving average of the house load (diagnostic, persisted) |
+| `sensor.charge44_cost_charged_today` / `_total` | grid-charge cost (EUR, restored across restarts) |
+| `sensor.charge44_discharge_value_today` / `_total` | value of discharged energy (EUR) |
+| `sensor.charge44_savings_today` / `_total` | value minus cost (EUR) |
 
 ### Sliders (numbers)
 | Entity | Default | Meaning |
 |---|---|---|
-| `number.charge44_target_soc` | 80 % | upper bound for charging — friendly name **SOC Max** |
-| `number.charge44_min_soc` | 10 % | discharge floor — friendly name **SOC Min** |
+| `number.charge44_target_soc` | 80 % | upper bound for charging (51–100 %) — friendly name **SOC Max** |
+| `number.charge44_min_soc` | 10 % | discharge floor (0–50 %) — friendly name **SOC Min** |
 
 ### Switches
 - `switch.charge44_regulation` — zero-export regulation on/off (friendly name **0-Regulation**)
@@ -93,6 +101,12 @@ Three steps in the config flow:
 - `switch.charge44_manual_charge` — immediate grid charge regardless of price; auto-disables when target SOC is reached. One-shot, doesn't survive an HA restart (friendly name **Charge Manual**)
 - `switch.charge44_smart_discharge` — preserve battery during cheap hours (friendly name **Discharge Smart**)
 - `switch.charge44_contiguous_block` — pick the cheapest contiguous N-hour block instead of the cheapest scattered N hours (config category)
+
+### Services
+- `charge44.force_charge` — one-shot grid charge up to SOC Max right now (same as **Charge Manual**).
+- `charge44.stop_charge` — stop grid charging; turns **Charge Manual** off and keeps automatic charging off until the current cheap window (or free-price period) has ended.
+- `charge44.set_target_soc` — set SOC Max (51–100 %); same as the slider, also forwarded to the device.
+- `charge44.refresh_prices` — re-fetch Tibber prices now.
 
 ## Logic
 
@@ -103,12 +117,19 @@ setpoint += error × Kp
 setpoint  = clamp(0, max_output)
 → Zendure/number/<SN>/outputLimit/set
 ```
-Hysteresis: only publish when the change exceeds the deadzone (5 W) AND the last publish is ≥ 3 s old.
+Hysteresis: only publish when the change exceeds the deadzone (5 W) AND the last publish is ≥ 3 s old. The error is only integrated when a publish is allowed, so Shelly ticks inside the 3 s window don't add up the same unanswered error. A standing setpoint is re-sent every 45 s (heartbeat); guards that park the output at 0 W (temperature, SOC Min, Smart-Discharge) re-send only on change or heartbeat.
 
 ### Cheap-Charge decision (per minute)
 ```
-cheap_hour      = current_price is in the cheapest N of the next 24 h
-spread_now      = today_max - current_price
+plan            = cheapest N h of the next 24 h (scattered or one block),
+                  picked once per price snapshot — re-picked only when new
+                  day-ahead prices arrive, never inside a planned slot
+cheap_hour      = current slot is in the plan
+
+discharge_hours = (soc_max - soc_min) × capacity / house_load_avg
+                  (clamped 1–24 h; 6 h until a load average exists)
+reference       = average of the priciest discharge_hours from now on
+spread_now      = reference - current_price
 break_even      = current_price × (1 / efficiency - 1)
 required_spread = max(min_spread_ct, break_even)
 profitable      = spread_now ≥ required_spread
@@ -130,14 +151,20 @@ or:             charge_when_free ∧ current_price ≤ 0
 or:             manual_charge ∧ soc < target_soc
               (everything except temperature + target SOC is ignored)
 ```
+Once the target SOC is reached, Cheap- and Free-Charge resume only after SOC has dropped 3 % below it — no ping-pong across the target for the rest of a cheap window.
+
+`forecast_kwh` is "remaining today"; after 12:00 with < 0.1 kWh left today it switches to the *tomorrow* sensor, if configured.
 
 ### Mode transitions
 On entering cheap-charge mode the plugin publishes:
 ```
+Zendure/number/<SN>/outputLimit/set   → 0
 Zendure/select/<SN>/acMode/set        → "Input mode"
 Zendure/number/<SN>/inputLimit/set    → charge_power
 ```
-On exit it reverses both. The zero-export regulation pauses while cheap-mode is active.
+On exit it sets `inputLimit` to 0 and `acMode` back to Output. The zero-export regulation pauses while cheap-mode is active.
+
+Self-healing, both directions: if the device's `acMode` mirror doesn't match the mode charge44 needs (a dropped command), the command is repeated at most every 10 s. Unloading the integration mid-charge ends the charge; after a restart, a device left in Input mode that charge44 doesn't want charging is reset once — even with the regulation off.
 
 ### Smart-Discharge
 Zero-export regulation always covers the home load only — it never actively exports (with a Tibber feed-in tariff near 0 ct/kWh, exporting is pure loss). Smart-Discharge **suspends** the regulation during the cheapest hours so the battery is preserved for normal/expensive ones:
@@ -153,7 +180,6 @@ With Smart-Discharge OFF the regulation runs every hour — the battery always c
 
 - Single instance only (`single_instance_allowed`)
 - Tested on **Zendure 800 Pro** + **Shelly 3EM Pro** only; other devices with the same MQTT topic structure should work but aren't verified
-- No options-flow yet; to change the Tibber token or forecast entity, remove the integration and re-add it
 
 ## Tests
 
@@ -167,8 +193,11 @@ pytest tests/ -v
 Suites:
 - `tests/test_want_cheap_charge.py` — decision matrix (temperature guard, SOC cap, free-charge override, manual-charge override, solar skip, cheap-charge gating)
 - `tests/test_compute_is_cheap.py` — Tibber price evaluation (spread, break-even, top-N, contiguous-block mode, 15-minute slots)
-- `tests/test_regulation.py` — PI loop + smart-discharge (safety blocks, deadzone, cheap-hour pause)
+- `tests/test_regulation.py` — PI loop + smart-discharge (safety blocks, deadzone, cheap-hour pause, acMode self-heal, publish pacing)
 - `tests/test_publish.py` — MQTT topics + payloads (cheap-mode quartet, minSoc forwarding)
+- `tests/test_charge_control.py` — services, stop_charge suppression, target-SOC hysteresis, unload/restart handling
+- `tests/test_price_plan.py` — frozen cheap-slot plan, reference price, next cheap window, house-load average
+- `tests/test_state_handling.py` — health, restored daily counters, forecast horizon, change-only updates
 
 CI runs on every push and PR — see `.github/workflows/tests.yml`.
 

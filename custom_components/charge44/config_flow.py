@@ -20,6 +20,7 @@ from homeassistant.helpers.selector import (
 
 from .const import (
     CONF_FORECAST_ENTITY,
+    CONF_FORECAST_TOMORROW_ENTITY,
     CONF_SHELLY_ID,
     CONF_TIBBER_HOME_ID,
     CONF_TIBBER_TOKEN,
@@ -47,18 +48,16 @@ class Charge44ConfigFlow(ConfigFlow, domain=DOMAIN):
         self._shelly_ids: list[str] = []
         self._devices: dict[str, Any] = {}
         self._tibber_token: str | None = None
-        self._forecast_entity: str | None = None
+        self._forecasts: dict[str, str] = {}
         self._homes: list[dict[str, Any]] = []
 
     def _build_data(self, home_id: str) -> dict[str, Any]:
-        data = {
+        return {
             **self._devices,
             CONF_TIBBER_TOKEN: self._tibber_token,
             CONF_TIBBER_HOME_ID: home_id,
+            **self._forecasts,
         }
-        if self._forecast_entity:
-            data[CONF_FORECAST_ENTITY] = self._forecast_entity
-        return data
 
     async def async_step_user(self, user_input=None):
         if self._async_current_entries():
@@ -89,13 +88,12 @@ class Charge44ConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             token = (user_input.get(CONF_TIBBER_TOKEN) or "").strip()
-            forecast = user_input.get(CONF_FORECAST_ENTITY) or None
+            self._forecasts = _forecast_options(user_input)
             if not token:
                 # Skip Tibber; apply forecast if set and finish.
-                data = {**self._devices}
-                if forecast:
-                    data[CONF_FORECAST_ENTITY] = forecast
-                return self.async_create_entry(title="charge44", data=data)
+                return self.async_create_entry(
+                    title="charge44", data={**self._devices, **self._forecasts}
+                )
 
             session = async_get_clientsession(self.hass)
             client = TibberApiClient(session, token)
@@ -104,7 +102,6 @@ class Charge44ConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_token"
             else:
                 self._tibber_token = token
-                self._forecast_entity = forecast
                 self._homes = homes
                 if len(homes) == 1:
                     return self.async_create_entry(
@@ -117,6 +114,9 @@ class Charge44ConfigFlow(ConfigFlow, domain=DOMAIN):
             {
                 vol.Optional(CONF_TIBBER_TOKEN, default=""): str,
                 vol.Optional(CONF_FORECAST_ENTITY): EntitySelector(
+                    EntitySelectorConfig(domain="sensor")
+                ),
+                vol.Optional(CONF_FORECAST_TOMORROW_ENTITY): EntitySelector(
                     EntitySelectorConfig(domain="sensor")
                 ),
             }
@@ -198,6 +198,15 @@ class Charge44ConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
 
+def _forecast_options(user_input: dict[str, Any]) -> dict[str, str]:
+    """The forecast entities the user picked (empty ones left out)."""
+    return {
+        key: user_input[key]
+        for key in (CONF_FORECAST_ENTITY, CONF_FORECAST_TOMORROW_ENTITY)
+        if user_input.get(key)
+    }
+
+
 class Charge44OptionsFlow(OptionsFlow):
     """Lets the user change Tibber token, home, and forecast entity without
     removing/re-adding the integration."""
@@ -206,7 +215,7 @@ class Charge44OptionsFlow(OptionsFlow):
         self._config_entry = config_entry
         self._new_token: str | None = None
         self._homes: list[dict[str, Any]] = []
-        self._new_forecast: str | None = None
+        self._new_opts: dict[str, Any] = {}
 
     async def async_step_init(self, user_input=None):
         data = {**self._config_entry.data, **self._config_entry.options}
@@ -214,13 +223,10 @@ class Charge44OptionsFlow(OptionsFlow):
 
         if user_input is not None:
             token = (user_input.get(CONF_TIBBER_TOKEN) or "").strip() or None
-            forecast = user_input.get(CONF_FORECAST_ENTITY) or None
             new_opts = dict(self._config_entry.options)
-
-            if forecast is None:
-                new_opts.pop(CONF_FORECAST_ENTITY, None)
-            else:
-                new_opts[CONF_FORECAST_ENTITY] = forecast
+            new_opts.pop(CONF_FORECAST_ENTITY, None)
+            new_opts.pop(CONF_FORECAST_TOMORROW_ENTITY, None)
+            new_opts.update(_forecast_options(user_input))
 
             if token is None:
                 new_opts.pop(CONF_TIBBER_TOKEN, None)
@@ -235,7 +241,7 @@ class Charge44OptionsFlow(OptionsFlow):
                 errors["base"] = "invalid_token"
             else:
                 self._new_token = token
-                self._new_forecast = forecast
+                self._new_opts = new_opts
                 self._homes = homes
                 if len(homes) == 1:
                     new_opts[CONF_TIBBER_TOKEN] = token
@@ -253,6 +259,12 @@ class Charge44OptionsFlow(OptionsFlow):
                     CONF_FORECAST_ENTITY,
                     description={"suggested_value": data.get(CONF_FORECAST_ENTITY)},
                 ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Optional(
+                    CONF_FORECAST_TOMORROW_ENTITY,
+                    description={
+                        "suggested_value": data.get(CONF_FORECAST_TOMORROW_ENTITY)
+                    },
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
             }
         )
         return self.async_show_form(
@@ -261,11 +273,9 @@ class Charge44OptionsFlow(OptionsFlow):
 
     async def async_step_pick_home(self, user_input=None):
         if user_input is not None:
-            new_opts = dict(self._config_entry.options)
+            new_opts = dict(self._new_opts)
             new_opts[CONF_TIBBER_TOKEN] = self._new_token
             new_opts[CONF_TIBBER_HOME_ID] = user_input[CONF_TIBBER_HOME_ID]
-            if self._new_forecast:
-                new_opts[CONF_FORECAST_ENTITY] = self._new_forecast
             return self.async_create_entry(title="", data=new_opts)
 
         options = [

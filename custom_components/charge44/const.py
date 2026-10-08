@@ -8,6 +8,7 @@ CONF_SHELLY_ID = "shelly_id"
 CONF_TIBBER_TOKEN = "tibber_token"
 CONF_TIBBER_HOME_ID = "tibber_home_id"
 CONF_FORECAST_ENTITY = "forecast_entity"
+CONF_FORECAST_TOMORROW_ENTITY = "forecast_tomorrow_entity"
 
 # Zendure topic patterns (state topics; append "/set" for commands)
 TOPIC_ZENDURE_SENSOR = "Zendure/sensor/{sn}/{prop}"
@@ -29,7 +30,7 @@ ZENDURE_SENSORS = (
     "packState",
     "packNum",
 )
-ZENDURE_NUMBERS = ("outputLimit", "inputLimit", "minSoc")
+ZENDURE_NUMBERS = ("outputLimit", "inverseMaxPower")
 ZENDURE_SELECTS = ("acMode",)
 
 # Hardware / regulation defaults
@@ -45,21 +46,31 @@ HEARTBEAT_INTERVAL = 45.0      # s, re-publish the standing outputLimit even whe
                                # and the deadzone otherwise makes us go silent
 STALE_GRID_AFTER = 15.0        # s, pause regulation if no fresh Shelly reading
 SAFETY_TICK_INTERVAL = 10.0    # s, how often to check for Shelly silence
+ACMODE_RETRY_INTERVAL = 10.0   # s, min gap between acMode writes — gives the
+                               # device time to echo a mode change before the
+                               # self-heal treats it as stuck
 DEFAULT_FALLBACK_DISCHARGE = 0  # W, outputLimit when Shelly stops reporting
 
 # Cheap-charge defaults
 DEFAULT_CHEAP_HOURS = 6                   # charge during N cheapest hours of 24h
 DEFAULT_TARGET_SOC = 80                   # stop charging when SOC reaches this
+TARGET_SOC_MIN = 51                       # %, floor for SOC Max — keeps it above SOC Min (max 50)
 DEFAULT_CHARGE_POWER = 1000               # inputLimit (W) during cheap-charge — Zendure clamps to App's "On-grid Input Mode" value
-DEFAULT_MIN_SPREAD_CT = 10.0              # ct/kWh min gap (today_max - current) for profitable charge
+DEFAULT_MIN_SPREAD_CT = 10.0              # ct/kWh min gap (reference - current) for profitable charge
 DEFAULT_EFFICIENCY = 85                   # % round-trip efficiency used to compute break-even
-DEFAULT_EXPENSIVE_HOURS = 6               # discharge during N most expensive hours
+DEFAULT_EXPENSIVE_HOURS = 6               # fallback discharge horizon (h) until a house-load average exists
+CHARGE_RESUME_HYSTERESIS = 3              # %, after hitting target SOC, auto-charge resumes only at target - N
+HOUSE_LOAD_TAU = 24 * 3600                # s, time constant of the house-load moving average
+HOUSE_LOAD_WARMUP = 3600                  # s, samples needed before the average is trusted
+FORECAST_TODAY_DONE_KWH = 0.1             # kWh, below this "remaining today" counts as no more PV today
 DEFAULT_BATTERY_CAPACITY = 1.92           # kWh (1 × AB2000X)
 DEFAULT_TEMP_LOW = 5.0                    # °C, pause below
 DEFAULT_TEMP_HIGH = 45.0                  # °C, pause above
 DRIFT_TOLERANCE_W = 15                    # W, allowed gap between commanded and observed outputLimit
 DRIFT_WARN_THRESHOLD = 3                  # consecutive mismatches before health degrades
 TIBBER_POLL_INTERVAL = 900                # s (15 min)
+TIBBER_TIMEOUT = 20                       # s, per Tibber API request
+TIBBER_STALE_AFTER = 3600                 # s, health flags tibber_offline past this without a good fetch
 
 # Event names fired on the HA event bus
 EVENT_CHEAP_CHARGE_STARTED = f"{DOMAIN}_cheap_charge_started"
