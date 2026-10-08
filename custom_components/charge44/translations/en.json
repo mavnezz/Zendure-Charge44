@@ -19,7 +19,11 @@
         "description": "Enter your Tibber API token for price-based charging. Pick a solar forecast sensor so cheap-charge is skipped when the sun will fill the battery anyway. Both optional — leave empty to skip.",
         "data": {
           "tibber_token": "Tibber API token",
-          "forecast_entity": "Solar forecast entity (remaining today, kWh)"
+          "forecast_entity": "Solar forecast entity (remaining today, kWh)",
+          "forecast_tomorrow_entity": "Solar forecast entity (tomorrow, kWh — optional)"
+        },
+        "data_description": {
+          "forecast_tomorrow_entity": "Used in the evening, once no more PV is expected today: a cheap slot before midnight then checks tomorrow's sun instead of charging from grid."
         }
       },
       "tibber_home": {
@@ -44,7 +48,11 @@
         "description": "Update Tibber token or solar forecast entity. Leave Tibber token empty to disable cheap-charge.",
         "data": {
           "tibber_token": "Tibber API token",
-          "forecast_entity": "Solar forecast entity"
+          "forecast_entity": "Solar forecast entity",
+          "forecast_tomorrow_entity": "Solar forecast entity (tomorrow)"
+        },
+        "data_description": {
+          "forecast_tomorrow_entity": "Used in the evening, once no more PV is expected today: a cheap slot before midnight then checks tomorrow's sun instead of charging from grid."
         }
       },
       "pick_home": {

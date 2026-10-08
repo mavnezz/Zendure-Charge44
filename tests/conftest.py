@@ -69,9 +69,14 @@ def _parse_datetime(value: str) -> datetime.datetime | None:
         return None
 
 
+def _as_local(value: datetime.datetime) -> datetime.datetime:
+    return value.astimezone(datetime.timezone.utc)
+
+
 sys.modules["homeassistant.util.dt"].now = _now
 sys.modules["homeassistant.util.dt"].parse_datetime = _parse_datetime
 sys.modules["homeassistant.util.dt"].utcnow = _now
+sys.modules["homeassistant.util.dt"].as_local = _as_local
 
 # --- aiohttp (only TibberApiClient touches it; we don't exercise that path) ---
 if "aiohttp" not in sys.modules:
@@ -108,9 +113,23 @@ def coord():
     obj.hass = MagicMock()
     obj.entry = MagicMock()
     obj.zendure_sn = "TESTSN"
+    obj._battery_sns = []
     obj._forecast_entity = None
+    obj._forecast_tomorrow_entity = None
     obj._tibber = None
     obj._last_published = None
     obj._last_publish_ts = 0.0
+    obj._last_energy_ts = 0.0
+    obj._last_acmode_ts = 0.0
+    obj._acmode_forced = None
+    obj._acmode_reconciled = False
+    obj._charge_suppressed = False
+    obj._charge_hold = False
+    obj._plan = None
+    obj._replan_requested = False
+    obj._has_current_price = False
+    obj._last_price_ok_ts = 0.0
+    obj._load_ema = None
+    obj._load_age = 0.0
     obj._publish_calls = []
     return obj

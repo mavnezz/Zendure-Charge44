@@ -6,7 +6,6 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import config_validation as cv
 
 from .const import (
     CONF_ZENDURE_BATTERY_SNS,
@@ -16,6 +15,7 @@ from .const import (
     SERVICE_REFRESH_PRICES,
     SERVICE_SET_TARGET_SOC,
     SERVICE_STOP_CHARGE,
+    TARGET_SOC_MIN,
 )
 from .coordinator import Charge44Coordinator
 from .discovery import remove_zendure_discovery
@@ -100,6 +100,12 @@ def _register_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_SET_TARGET_SOC,
         set_target_soc,
-        schema=vol.Schema({vol.Required("soc"): vol.All(int, vol.Range(min=0, max=100))}),
+        schema=vol.Schema(
+            {
+                vol.Required("soc"): vol.All(
+                    vol.Coerce(int), vol.Range(min=TARGET_SOC_MIN, max=100)
+                )
+            }
+        ),
     )
     hass.services.async_register(DOMAIN, SERVICE_REFRESH_PRICES, refresh_prices)

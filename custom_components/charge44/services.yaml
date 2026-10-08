@@ -1,23 +1,23 @@
 force_charge:
   name: Force charge
-  description: Immediately enter cheap-charge mode — sets acMode to Input and inputLimit to charge_power, bypassing the price/SOC/forecast gates.
+  description: Start a one-shot grid charge up to the target SOC right now, bypassing the price and forecast gates — same as turning on the Charge Manual switch.
 
 stop_charge:
   name: Stop charge
-  description: Leave cheap-charge mode and return to zero-export regulation.
+  description: Stop grid charging and return to zero-export regulation. Turns off Charge Manual and keeps automatic charging off until the current cheap window (or free-price period) has ended.
 
 set_target_soc:
   name: Set target SOC
-  description: Update the charge target SOC (where cheap-charge stops).
+  description: Update the charge target SOC (where cheap-charge stops) — same as the SOC Max slider, also forwarded to the device.
   fields:
     soc:
       name: Target SOC
-      description: Target state of charge in percent (0-100).
+      description: Target state of charge in percent (51-100).
       required: true
       example: 80
       selector:
         number:
-          min: 0
+          min: 51
           max: 100
           step: 1
           unit_of_measurement: "%"

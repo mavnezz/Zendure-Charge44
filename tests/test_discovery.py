@@ -71,3 +71,32 @@ def test_remove_clears_both_current_and_legacy():
     # ... and the current hub sensor too, all with empty payloads
     assert discovery._config_topic("sensor", f"zendure_{SN}", "hyper_tmp") in topics
     assert all(payload == "" for _, payload in calls)
+
+
+def test_discovery_uses_default_entity_id():
+    """object_id is deprecated (HA 2025.10, gone in 2026.4); default_entity_id
+    takes the full lowercase domain.object_id."""
+    import json
+
+    calls = _run(
+        lambda: discovery.publish_zendure_discovery(None, "ABC123", ["CO4EENJJN381071"])
+    )
+    configs = [json.loads(p) for _, p in calls]
+    assert configs
+    for cfg in configs:
+        assert "object_id" not in cfg
+        eid = cfg["default_entity_id"]
+        assert eid == eid.lower()
+        assert eid.startswith("sensor.zendure_")
+    eids = {cfg["default_entity_id"] for cfg in configs}
+    assert "sensor.zendure_abc123_hyper_tmp" in eids
+    assert "sensor.zendure_co4eenjjn381071_soc_level" in eids
+
+
+def test_battery_model_and_capacity_from_sn():
+    assert discovery.pack_info("CO4EENJJN381071") == ("AB2000", 1.92)
+    assert discovery.pack_info("FO4XXXXXXX111111") == ("AB3000", 2.88)
+    assert discovery.pack_info("GO4XXXXXXX111111") == ("AB3000L", 2.88)
+    assert discovery.pack_info("") == ("Battery pack", 1.92)
+    device = discovery._battery_device("FO4XXXXXXX111111", SN)
+    assert device["model"] == "AB3000"
