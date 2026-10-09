@@ -232,7 +232,7 @@ class Charge44Coordinator:
         self._charge_suppressed: bool = False  # stop_charge until the reason ends
         self._charge_hold: bool = False  # target hit, waiting out the hysteresis
         self._stall_watch_since: float | None = None
-        self._charge_seen_ts: float = 0.0  # last time the battery took real charge
+        self._charge_seen_ts: float | None = None  # last real charge into the battery
         self._plan: PricePlan | None = None
         self._replan_requested: bool = False
         self._has_current_price: bool = False
@@ -1124,7 +1124,9 @@ class Charge44Coordinator:
         now = time.monotonic()
         if self._stall_watch_since is None:
             self._stall_watch_since = now
-        last_ok = max(self._stall_watch_since, self._charge_seen_ts)
+        last_ok = self._stall_watch_since
+        if self._charge_seen_ts is not None:
+            last_ok = max(last_ok, self._charge_seen_ts)
         stalled = now - last_ok >= CHARGE_STALL_AFTER
         if stalled and not self.state.charge_stalled:
             _LOGGER.warning(
