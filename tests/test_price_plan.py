@@ -1,5 +1,5 @@
-"""Price planning: frozen cheap-slot plan, reference price over the discharge
-horizon, next-cheap-window sensor, house-load average."""
+"""Price planning: frozen cheap-slot plan, profitability against the window
+max, next-cheap-window sensor."""
 from __future__ import annotations
 
 import datetime
@@ -56,43 +56,15 @@ def test_next_cheap_start_skips_unprofitable_slots(priced):
     assert priced._compute_next_cheap_start(window, BASE) is None
 
 
-# --- point 12: reference price ---------------------------------------------
+# --- profitability: against the window max -------------------------------
 
-def test_reference_is_average_not_single_spike(priced):
-    """A lone spike no longer makes a small spread look profitable."""
+def test_profitability_uses_window_max(priced):
+    """Spread is measured against the priciest slot of the window (v0.10
+    behaviour, restored in v0.11.1) — not an average over many hours."""
     priced.state.min_spread_ct = 20.0
     window = _window([0.20] + [0.30] * 22 + [0.80])
-    # vs. the spike: 0.80 - 0.20 = 60 ct → would charge.
-    # vs. avg of top 6 h (fallback): (0.80 + 5 × 0.30) / 6 = 38.33 ct → 18 ct.
-    assert priced._compute_is_cheap(window, window[0]) is False
-    assert priced.state.reference_hours == 6.0
-    assert priced.state.reference_price_ct == 38.33
-    assert priced.state.spread_now_ct == 18.33
-
-
-def test_reference_only_counts_slots_ahead(priced):
-    window = _window([0.90, 0.10] + [0.30] * 22)
-    ref, _ = priced._reference_price(window, window[1]["start"])
-    assert ref == pytest.approx(0.30)  # the 0.90 slot is already behind
-
-
-def test_discharge_hours_from_battery_and_load(priced):
-    priced.state.battery_capacity = 1.92
-    priced.state.target_soc = 80
-    priced.state.min_soc = 10
-    priced.state.house_load_avg_w = 224.0  # 1.344 kWh usable / 224 W
-    assert priced._discharge_hours() == pytest.approx(6.0)
-
-
-def test_discharge_hours_clamped(priced):
-    priced.state.house_load_avg_w = 5000.0
-    assert priced._discharge_hours() == 1.0
-    priced.state.house_load_avg_w = 1.0
-    assert priced._discharge_hours() == 24.0
-
-
-def test_discharge_hours_fallback_without_load(priced):
-    assert priced._discharge_hours() == 6.0
+    assert priced._compute_is_cheap(window, window[0]) is True
+    assert priced.state.spread_now_ct == 60.0
 
 
 # --- point 13: frozen plan -------------------------------------------------
@@ -131,27 +103,3 @@ def test_block_toggle_requests_replan(priced):
     _replan_at(priced, BASE + 0.5 * H)
     assert priced._plan.cheap_starts == {BASE + 3 * H, BASE + 4 * H, BASE + 5 * H}
 
-
-# --- point 12: house-load average -----------------------------------------
-
-def test_house_load_needs_warmup_then_averages(coord):
-    coord.state.grid_power = 100.0
-    coord.state.output_home_power = 200.0  # 300 W house
-    coord._update_house_load(1800)
-    assert coord.state.house_load_avg_w is None  # < 1 h of data
-    coord.state.grid_power = 0.0  # 200 W house
-    coord._update_house_load(1800)
-    assert coord.state.house_load_avg_w == 250.0
-
-
-def test_house_load_skipped_while_grid_charging(coord):
-    coord.state.cheap_mode_active = True
-    coord.state.grid_power = 1200.0
-    coord.state.output_home_power = 0.0
-    coord._update_house_load(7200)
-    assert coord._load_ema is None
-
-
-def test_restored_house_load_is_trusted(coord):
-    coord.restore_house_load(310.0)
-    assert coord.state.house_load_avg_w == 310.0

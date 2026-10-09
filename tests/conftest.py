@@ -129,7 +129,5 @@ def coord():
     obj._replan_requested = False
     obj._has_current_price = False
     obj._last_price_ok_ts = 0.0
-    obj._load_ema = None
-    obj._load_age = 0.0
     obj._publish_calls = []
     return obj
