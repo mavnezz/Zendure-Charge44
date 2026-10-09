@@ -235,14 +235,6 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=2,
         value_fn=lambda s: s.spread_now_ct,
-        attrs_fn=lambda s: (
-            {
-                "reference_price_ct": s.reference_price_ct,
-                "reference_hours": s.reference_hours,
-            }
-            if s.reference_price_ct is not None
-            else {}
-        ),
     ),
     Charge44SensorDescription(
         key="required_spread_ct",
@@ -333,7 +325,6 @@ async def async_setup_entry(
         Charge44CostSensor(coordinator, key, name, state_key, daily)
         for key, name, state_key, daily in COST_SENSORS
     )
-    entities.append(Charge44HouseLoadSensor(coordinator))
     async_add_entities(entities)
 
 
@@ -451,29 +442,3 @@ class Charge44CostSensor(Charge44Entity, RestoreSensor):
     def last_reset(self) -> datetime | None:
         return self.coordinator.today_start() if self._daily else None
 
-
-class Charge44HouseLoadSensor(Charge44Entity, RestoreSensor):
-    """Moving average of the house load. Persisted so the discharge horizon
-    used by the profitability check survives a restart."""
-
-    _attr_device_class = SensorDeviceClass.POWER
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = UnitOfPower.WATT
-    _attr_suggested_display_precision = 0
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator: Charge44Coordinator) -> None:
-        super().__init__(coordinator, "house_load_avg", "House load average")
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        last = await self.async_get_last_sensor_data()
-        if last is not None and last.native_value is not None:
-            try:
-                self.coordinator.restore_house_load(float(last.native_value))
-            except (ValueError, TypeError):
-                pass
-
-    @property
-    def native_value(self) -> Any:
-        return self.coordinator.state.house_load_avg_w

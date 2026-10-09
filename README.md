@@ -15,7 +15,7 @@ No cloud, no middleware — speaks directly to your local MQTT broker.
 Reads live grid power from the Shelly 3EM Pro and adjusts the Zendure's `outputLimit` to keep the net flow near a configurable target (default 0 W).
 
 ### 2. Price-based grid charging (Cheap-Charge)
-With a Tibber API token, the plugin pulls the next 24 h of prices. During the N cheapest hours it switches the Zendure to **Input mode** and pulls power through `inputLimit` — but only if the current price sits far enough below the prices the stored energy will actually displace to cover round-trip losses.
+With a Tibber API token, the plugin pulls the next 24 h of prices. During the N cheapest hours it switches the Zendure to **Input mode** and pulls power through `inputLimit` — but only if the spread between the current price and the day's max covers round-trip losses.
 
 ### 3. Solar-forecast smart skip
 If the `forecast_solar` integration is installed, the plugin compares expected remaining production to the kWh still needed to reach target SOC. **If the sun alone will fill the battery, no grid charging happens — even during a cheap window.** With an optional *tomorrow* forecast sensor, a cheap slot in the evening (after today's PV is done) checks tomorrow's sun instead.
@@ -80,10 +80,9 @@ Requires Home Assistant **2025.10** or newer.
 | `sensor.charge44_solar_forecast_remaining` | kWh of solar left today |
 | `sensor.charge44_grid_charge_needed` | shortfall vs target SOC |
 | `sensor.charge44_today_min_price` / `_max_price` | day min/max (ct/kWh) |
-| `sensor.charge44_spread_now` | reference price minus current (attributes: `reference_price_ct`, `reference_hours`) |
+| `sensor.charge44_spread_now` | today's max minus current |
 | `sensor.charge44_required_spread` | required spread (min-spread vs break-even) |
 | `sensor.charge44_charge_profitable` | "yes"/"no" — would charging pay off |
-| `sensor.charge44_house_load_average` | moving average of the house load (diagnostic, persisted) |
 | `sensor.charge44_cost_charged_today` / `_total` | grid-charge cost (EUR, restored across restarts) |
 | `sensor.charge44_discharge_value_today` / `_total` | value of discharged energy (EUR) |
 | `sensor.charge44_savings_today` / `_total` | value minus cost (EUR) |
@@ -125,11 +124,7 @@ plan            = cheapest N h of the next 24 h (scattered or one block),
                   picked once per price snapshot — re-picked only when new
                   day-ahead prices arrive, never inside a planned slot
 cheap_hour      = current slot is in the plan
-
-discharge_hours = (soc_max - soc_min) × capacity / house_load_avg
-                  (clamped 1–24 h; 6 h until a load average exists)
-reference       = average of the priciest discharge_hours from now on
-spread_now      = reference - current_price
+spread_now      = today_max - current_price   (max of the next 24 h)
 break_even      = current_price × (1 / efficiency - 1)
 required_spread = max(min_spread_ct, break_even)
 profitable      = spread_now ≥ required_spread
@@ -196,7 +191,7 @@ Suites:
 - `tests/test_regulation.py` — PI loop + smart-discharge (safety blocks, deadzone, cheap-hour pause, acMode self-heal, publish pacing)
 - `tests/test_publish.py` — MQTT topics + payloads (cheap-mode quartet, minSoc forwarding)
 - `tests/test_charge_control.py` — services, stop_charge suppression, target-SOC hysteresis, unload/restart handling
-- `tests/test_price_plan.py` — frozen cheap-slot plan, reference price, next cheap window, house-load average
+- `tests/test_price_plan.py` — frozen cheap-slot plan, profitability vs. window max, next cheap window
 - `tests/test_state_handling.py` — health, restored daily counters, forecast horizon, change-only updates
 
 CI runs on every push and PR — see `.github/workflows/tests.yml`.

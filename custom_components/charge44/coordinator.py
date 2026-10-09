@@ -32,7 +32,6 @@ from .const import (
     DEFAULT_CHEAP_HOURS,
     DEFAULT_DEADZONE,
     DEFAULT_EFFICIENCY,
-    DEFAULT_EXPENSIVE_HOURS,
     DEFAULT_FALLBACK_DISCHARGE,
     DEFAULT_GRID_BIAS,
     DEFAULT_KP,
@@ -50,8 +49,6 @@ from .const import (
     EVENT_TEMPERATURE_GUARD,
     FORECAST_TODAY_DONE_KWH,
     HEARTBEAT_INTERVAL,
-    HOUSE_LOAD_TAU,
-    HOUSE_LOAD_WARMUP,
     MIN_PUBLISH_INTERVAL,
     SAFETY_TICK_INTERVAL,
     SIGNAL_UPDATE,
@@ -157,16 +154,11 @@ class State:
     solar_remaining_kwh: float | None = None
     grid_charge_needed_kwh: float | None = None
 
-    # Moving average of the house load (W) — sizes the discharge horizon
-    house_load_avg_w: float | None = None
-
     # Price-derived diagnostics (ct/kWh)
     today_max_price: float | None = None
     today_min_price: float | None = None
-    spread_now_ct: float | None = None           # reference - current
+    spread_now_ct: float | None = None           # today_max - current
     required_spread_ct: float | None = None      # max(min_spread_ct, break-even)
-    reference_price_ct: float | None = None      # avg of the N priciest slots ahead
-    reference_hours: float | None = None         # N, in hours: how long the battery lasts
     profitable_now: bool = False
 
     # Cumulative energy counters (kWh) — for HA Energy Dashboard
@@ -236,8 +228,6 @@ class Charge44Coordinator:
         self._replan_requested: bool = False
         self._has_current_price: bool = False
         self._last_price_ok_ts: float = 0.0
-        self._load_ema: float | None = None
-        self._load_age: float = 0.0
         self._tibber: TibberApiClient | None = None
         # Seed battery capacity from known battery SNs before the first MQTT msg.
         self._update_battery_capacity()
@@ -396,36 +386,6 @@ class Charge44Coordinator:
             self.state.energy_home_kwh += (
                 self.state.output_home_power * dt_hours / 1000.0
             )
-        self._update_house_load(dt_hours * 3600.0)
-
-    def _update_house_load(self, dt_s: float) -> None:
-        """Moving average of the house load = grid draw + Zendure output.
-
-        Running mean for the first HOUSE_LOAD_TAU seconds, an EMA with that time
-        constant afterwards. Skipped while grid-charging: the grid then also
-        feeds the battery, so grid + output overstates the house.
-        """
-        if self.state.cheap_mode_active:
-            return
-        if self.state.grid_power is None or self.state.output_home_power is None:
-            return
-        sample = max(0.0, self.state.grid_power + self.state.output_home_power)
-        self._load_age += dt_s
-        if self._load_ema is None:
-            self._load_ema = sample
-        else:
-            weight = dt_s / min(self._load_age, HOUSE_LOAD_TAU)
-            self._load_ema += weight * (sample - self._load_ema)
-        if self._load_age >= HOUSE_LOAD_WARMUP:
-            self.state.house_load_avg_w = round(self._load_ema, 1)
-
-    def restore_house_load(self, value: float) -> None:
-        """Seed the average from the value persisted before a restart."""
-        if self._load_ema is not None:
-            return
-        self._load_ema = value
-        self._load_age = HOUSE_LOAD_TAU
-        self.state.house_load_avg_w = round(value, 1)
 
     def restore_daily_counter(
         self, key: str, value: float, last_updated: datetime
@@ -959,36 +919,6 @@ class Charge44Coordinator:
         eff = max(0.5, min(1.0, self.state.efficiency / 100.0))
         return max(self.state.min_spread_ct / 100.0, price * (1.0 / eff - 1.0))
 
-    def _discharge_hours(self) -> float:
-        """How long the usable battery energy lasts at the average house load —
-        the span over which stored energy actually displaces grid prices."""
-        load = self.state.house_load_avg_w
-        if load is None:
-            return float(DEFAULT_EXPENSIVE_HOURS)
-        if load <= 0:
-            return 24.0
-        usable_kwh = max(
-            0.0,
-            (self.state.target_soc - self.state.min_soc) / 100.0
-            * self.state.battery_capacity,
-        )
-        return max(1.0, min(24.0, usable_kwh * 1000.0 / load))
-
-    def _reference_price(
-        self, window: list[dict[str, Any]], after: datetime
-    ) -> tuple[float, float]:
-        """Average of the N priciest slots from `after` on, N = discharge hours.
-
-        Comparing against the single priciest slot overstates the gain: with
-        15-min prices that is often one short spike, while the battery spreads
-        its energy over hours. Returns (price EUR/kWh, hours)."""
-        ahead = [p["value"] for p in window if p["start"] >= after]
-        hours = self._discharge_hours()
-        slots_per_hour = 60.0 / max(1, self.state.slot_minutes)
-        n = max(1, min(len(ahead), int(round(hours * slots_per_hour))))
-        top = sorted(ahead, reverse=True)[:n]
-        return sum(top) / n, hours
-
     def _compute_is_cheap(
         self, window: list[dict[str, Any]], current: dict[str, Any] | None
     ) -> bool:
@@ -997,8 +927,6 @@ class Charge44Coordinator:
             self.state.today_min_price = None
             self.state.spread_now_ct = None
             self.state.required_spread_ct = None
-            self.state.reference_price_ct = None
-            self.state.reference_hours = None
             self.state.profitable_now = False
             return False
 
@@ -1008,15 +936,12 @@ class Charge44Coordinator:
         current_val = current["value"]
 
         required = self._required_spread(current_val)
-        reference, ref_hours = self._reference_price(window, current["start"])
-        spread_now = reference - current_val
+        spread_now = day_max - current_val
 
         self.state.today_max_price = round(day_max * 100, 2)
         self.state.today_min_price = round(day_min * 100, 2)
         self.state.spread_now_ct = round(spread_now * 100, 2)
         self.state.required_spread_ct = round(required * 100, 2)
-        self.state.reference_price_ct = round(reference * 100, 2)
-        self.state.reference_hours = round(ref_hours, 1)
         self.state.profitable_now = spread_now >= required
 
         plan = self._plan or self._build_plan(window, None)
@@ -1068,13 +993,13 @@ class Charge44Coordinator:
         if not window:
             return None
         plan = self._plan or self._build_plan(window, None)
+        day_max = max(p["value"] for p in window)
         upcoming = sorted(
             (p for p in window if p["start"] > now and p["start"] in plan.cheap_starts),
             key=lambda p: p["start"],
         )
         for p in upcoming:
-            reference, _ = self._reference_price(window, p["start"])
-            if reference - p["value"] >= self._required_spread(p["value"]):
+            if day_max - p["value"] >= self._required_spread(p["value"]):
                 return p["start"]
         return None
 
