@@ -164,6 +164,10 @@ or:             manual_charge ∧ soc < target_soc
 ```
 Once the target SOC is reached, Cheap- and Free-Charge resume only after SOC has dropped 3 % below it — no ping-pong across the target for the rest of a cheap window.
 
+**Standby protection (reserve top-up):** below SOC Min the regulation parks the output at 0 W, but the hub's own consumption (~10 W) keeps draining the battery — over a dull, pricey stretch that ends in a deep discharge. When SOC falls 3 % below SOC Min (e.g. 7 % at SOC Min 10 %), charge44 grid-charges back to SOC Min + 3 % regardless of price (~0.25 kWh per top-up). Only the temperature guard blocks it; `stop_charge` does not. SOC Min 0 % disables it.
+
+`sensor.charge44_cheap_charge_active` carries a `reason` attribute while charging (`manual`, `reserve`, `free`, `cheap`); the `charge44_cheap_charge_started` event has the same field.
+
 `forecast_kwh` is "remaining today"; after 12:00 with < 0.1 kWh left today it switches to the *tomorrow* sensor, if configured.
 
 ### Mode transitions
@@ -206,7 +210,7 @@ Suites:
 - `tests/test_compute_is_cheap.py` — Tibber price evaluation (spread, break-even, top-N, contiguous-block mode, 15-minute slots)
 - `tests/test_regulation.py` — PI loop + smart-discharge (safety blocks, deadzone, cheap-hour pause, acMode self-heal, publish pacing)
 - `tests/test_publish.py` — MQTT topics + payloads (cheap-mode quartet, minSoc forwarding)
-- `tests/test_charge_control.py` — services, stop_charge suppression, target-SOC hysteresis, unload/restart handling, stalled-charge detection
+- `tests/test_charge_control.py` — services, stop_charge suppression, target-SOC hysteresis, unload/restart handling, stalled-charge detection, reserve top-up
 - `tests/test_price_plan.py` — frozen cheap-slot plan, profitability vs. window max, next cheap window
 - `tests/test_state_handling.py` — health, restored daily counters, forecast horizon, change-only updates
 

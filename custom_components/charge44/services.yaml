@@ -4,7 +4,7 @@ force_charge:
 
 stop_charge:
   name: Stop charge
-  description: Stop grid charging and return to zero-export regulation. Turns off Charge Manual and keeps automatic charging off until the current cheap window (or free-price period) has ended.
+  description: Stop grid charging and return to zero-export regulation. Turns off Charge Manual and keeps automatic charging off until the current cheap window (or free-price period) has ended. The standby-protection top-up below SOC Min is not stopped.
 
 set_target_soc:
   name: Set target SOC
