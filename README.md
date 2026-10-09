@@ -107,6 +107,22 @@ Requires Home Assistant **2025.10** or newer.
 - `charge44.set_target_soc` — set SOC Max (51–100 %); same as the slider, also forwarded to the device.
 - `charge44.refresh_prices` — re-fetch Tibber prices now.
 
+### Health & events
+`sensor.charge44_health` reports the worst current condition: `ok`, `shelly_stale`, `temperature_too_cold` / `temperature_too_hot`, `zendure_drift`, `zendure_not_charging`, `tibber_offline`.
+
+Events on the HA bus (for automations): `charge44_cheap_charge_started`, `charge44_cheap_charge_ended`, `charge44_temperature_guard`, `charge44_drift_detected`, `charge44_charge_stalled`.
+
+`charge44_charge_stalled` / `zendure_not_charging`: a grid charge is running and the device confirms *Input mode*, but the battery has taken less than 100 W for 5 minutes (not judged in the last 5 % below SOC Max, where the charge tapers). Seen after a deep discharge — the Zendure accepted every command but only trickle-charged until the hub was restarted. charge44 only reports this, it doesn't intervene. Example notification:
+```yaml
+triggers:
+  - trigger: event
+    event_type: charge44_charge_stalled
+actions:
+  - action: notify.notify
+    data:
+      message: "Zendure lädt nicht (SOC {{ trigger.event.data.soc }} %) — Hub neu starten?"
+```
+
 ## Logic
 
 ### Regulation (per Shelly tick, ~5 s)
@@ -190,7 +206,7 @@ Suites:
 - `tests/test_compute_is_cheap.py` — Tibber price evaluation (spread, break-even, top-N, contiguous-block mode, 15-minute slots)
 - `tests/test_regulation.py` — PI loop + smart-discharge (safety blocks, deadzone, cheap-hour pause, acMode self-heal, publish pacing)
 - `tests/test_publish.py` — MQTT topics + payloads (cheap-mode quartet, minSoc forwarding)
-- `tests/test_charge_control.py` — services, stop_charge suppression, target-SOC hysteresis, unload/restart handling
+- `tests/test_charge_control.py` — services, stop_charge suppression, target-SOC hysteresis, unload/restart handling, stalled-charge detection
 - `tests/test_price_plan.py` — frozen cheap-slot plan, profitability vs. window max, next cheap window
 - `tests/test_state_handling.py` — health, restored daily counters, forecast horizon, change-only updates
 
