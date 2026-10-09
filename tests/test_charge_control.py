@@ -1,9 +1,11 @@
 """Charge control: services, stop_charge suppression, target-SOC hysteresis,
-and leaving the device in a sane acMode across unload / restart."""
+leaving the device in a sane acMode across unload / restart, and detecting a
+grid-charge the device accepts but doesn't carry out."""
 from __future__ import annotations
 
 import asyncio
 import datetime
+import time
 
 import pytest
 
@@ -224,3 +226,92 @@ def test_reconcile_runs_only_once(ctl):
     ctl.state.ac_mode = "Input mode"
     ctl._evaluate()
     assert ("acMode", "Output mode") not in ctl.calls
+
+
+# --- stalled grid-charge detection ----------------------------------------
+
+@pytest.fixture
+def charging(ctl):
+    """Cheap-charge active and confirmed by the device mirror."""
+    ctl.state.cheap_mode_active = True
+    ctl.state.ac_mode = "Input mode"
+    ctl.state.soc = 10
+    ctl.state.target_soc = 100
+    ctl.hass.bus.async_fire.reset_mock()
+    return ctl
+
+
+def _stall_events(coord):
+    return [
+        c for c in coord.hass.bus.async_fire.call_args_list
+        if c.args[0] == "charge44_charge_stalled"
+    ]
+
+
+def test_stall_reported_after_five_minutes_without_charge(charging):
+    charging._stall_watch_since = time.monotonic() - 301
+    charging._check_charge_stall()
+    charging._update_health()
+    assert charging.state.charge_stalled is True
+    assert charging.state.health == "zendure_not_charging"
+    assert len(_stall_events(charging)) == 1
+
+
+def test_stall_event_fires_once_per_episode(charging):
+    charging._stall_watch_since = time.monotonic() - 301
+    charging._check_charge_stall()
+    charging._check_charge_stall()
+    assert len(_stall_events(charging)) == 1
+
+
+def test_no_stall_within_grace_period(charging):
+    charging._stall_watch_since = time.monotonic() - 120
+    charging._check_charge_stall()
+    assert charging.state.charge_stalled is False
+
+
+def test_real_charge_power_keeps_it_healthy(charging):
+    charging._stall_watch_since = time.monotonic() - 600
+    charging._update_zendure("sensor", "outputPackPower", "1000")
+    charging._check_charge_stall()
+    assert charging.state.charge_stalled is False
+
+
+def test_trickle_below_threshold_still_stalls(charging):
+    """The 2026-10-09 signature: 20-75 W pulses for hours."""
+    charging._stall_watch_since = time.monotonic() - 301
+    charging._update_zendure("sensor", "outputPackPower", "75")
+    charging._check_charge_stall()
+    assert charging.state.charge_stalled is True
+
+
+def test_recovery_clears_stall(charging):
+    charging._stall_watch_since = time.monotonic() - 301
+    charging._check_charge_stall()
+    charging._update_zendure("sensor", "outputPackPower", "990")
+    charging._check_charge_stall()
+    assert charging.state.charge_stalled is False
+
+
+def test_no_watch_until_device_confirms_input_mode(charging):
+    """A dropped acMode is the self-heal's job, not a stall."""
+    charging.state.ac_mode = "Output mode"
+    charging._stall_watch_since = time.monotonic() - 600
+    charging._check_charge_stall()
+    assert charging.state.charge_stalled is False
+    assert charging._stall_watch_since is None
+
+
+def test_no_stall_near_target(charging):
+    """The charge tapers in the last few % — not a stall."""
+    charging.state.soc = 96
+    charging._stall_watch_since = time.monotonic() - 600
+    charging._check_charge_stall()
+    assert charging.state.charge_stalled is False
+
+
+def test_no_watch_outside_cheap_mode(charging):
+    charging.state.cheap_mode_active = False
+    charging._stall_watch_since = time.monotonic() - 600
+    charging._check_charge_stall()
+    assert charging.state.charge_stalled is False

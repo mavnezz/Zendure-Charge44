@@ -59,6 +59,9 @@ DEFAULT_CHARGE_POWER = 1000               # inputLimit (W) during cheap-charge �
 DEFAULT_MIN_SPREAD_CT = 10.0              # ct/kWh min gap (today_max - current) for profitable charge
 DEFAULT_EFFICIENCY = 85                   # % round-trip efficiency used to compute break-even
 CHARGE_RESUME_HYSTERESIS = 3              # %, after hitting target SOC, auto-charge resumes only at target - N
+CHARGE_STALL_W = 100                      # W, battery charge power that counts as "actually charging"
+CHARGE_STALL_AFTER = 300                  # s, Input mode confirmed but below CHARGE_STALL_W this long → stalled
+CHARGE_STALL_SOC_MARGIN = 5               # %, don't judge the last N % below target (charge tapers there)
 FORECAST_TODAY_DONE_KWH = 0.1             # kWh, below this "remaining today" counts as no more PV today
 DEFAULT_BATTERY_CAPACITY = 1.92           # kWh (1 × AB2000X)
 DEFAULT_TEMP_LOW = 5.0                    # °C, pause below
@@ -74,6 +77,7 @@ EVENT_CHEAP_CHARGE_STARTED = f"{DOMAIN}_cheap_charge_started"
 EVENT_CHEAP_CHARGE_ENDED = f"{DOMAIN}_cheap_charge_ended"
 EVENT_TEMPERATURE_GUARD = f"{DOMAIN}_temperature_guard"
 EVENT_DRIFT_DETECTED = f"{DOMAIN}_drift_detected"
+EVENT_CHARGE_STALLED = f"{DOMAIN}_charge_stalled"
 
 # Service names
 SERVICE_FORCE_CHARGE = "force_charge"

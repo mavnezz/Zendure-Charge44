@@ -20,6 +20,9 @@ from .const import (
     AC_MODE_OUTPUT,
     ACMODE_RETRY_INTERVAL,
     CHARGE_RESUME_HYSTERESIS,
+    CHARGE_STALL_AFTER,
+    CHARGE_STALL_SOC_MARGIN,
+    CHARGE_STALL_W,
     CONF_FORECAST_ENTITY,
     CONF_FORECAST_TOMORROW_ENTITY,
     CONF_SHELLY_ID,
@@ -45,6 +48,7 @@ from .const import (
     DRIFT_WARN_THRESHOLD,
     EVENT_CHEAP_CHARGE_ENDED,
     EVENT_CHEAP_CHARGE_STARTED,
+    EVENT_CHARGE_STALLED,
     EVENT_DRIFT_DETECTED,
     EVENT_TEMPERATURE_GUARD,
     FORECAST_TODAY_DONE_KWH,
@@ -176,6 +180,9 @@ class State:
     drift_count: int = 0
     drift_active: bool = False
 
+    # Grid-charge commanded and confirmed, but the battery takes ~nothing
+    charge_stalled: bool = False
+
     # Health aggregate
     health: str = "ok"
 
@@ -224,6 +231,8 @@ class Charge44Coordinator:
         self._acmode_reconciled: bool = False
         self._charge_suppressed: bool = False  # stop_charge until the reason ends
         self._charge_hold: bool = False  # target hit, waiting out the hysteresis
+        self._stall_watch_since: float | None = None
+        self._charge_seen_ts: float = 0.0  # last time the battery took real charge
         self._plan: PricePlan | None = None
         self._replan_requested: bool = False
         self._has_current_price: bool = False
@@ -475,6 +484,9 @@ class Charge44Coordinator:
         if self.state.drift_active:
             self.state.health = "zendure_drift"
             return
+        if self.state.charge_stalled:
+            self.state.health = "zendure_not_charging"
+            return
         if self._tibber is not None and (
             not self._has_current_price
             or time.monotonic() - self._last_price_ok_ts > TIBBER_STALE_AFTER
@@ -504,6 +516,8 @@ class Charge44Coordinator:
                     self.state.pack_output = float(raw)
                 elif prop == "outputPackPower":
                     self.state.pack_input = float(raw)
+                    if self.state.pack_input >= CHARGE_STALL_W:
+                        self._charge_seen_ts = time.monotonic()
                 elif prop == "hyperTmp":
                     # Device publishes Kelvin (e.g. 305.1), not °C.
                     self.state.temperature = round(float(raw) - 273.15, 1)
@@ -808,6 +822,7 @@ class Charge44Coordinator:
         self._update_forecast_and_gap()
         self._apply_mode(is_cheap)
         self._reconcile_ac_mode()
+        self._check_charge_stall()
         self._update_health()
         self._maybe_reset_today_counters()
         self._notify()
@@ -1086,6 +1101,50 @@ class Charge44Coordinator:
             )
             self._publish_input_limit(0)
             self._publish_ac_mode(AC_MODE_OUTPUT)
+
+    def _check_charge_stall(self) -> None:
+        """Grid-charge commanded and confirmed (status mirror says Input mode),
+        yet the battery takes next to nothing. Seen after a deep discharge on
+        2026-10-09: inputLimit 1000 accepted, ~20 W trickle for hours, only a
+        hub restart helped. Report it (health + event); don't intervene.
+
+        Judged on battery charge power, not grid input, so PV-covered charging
+        doesn't count as a stall; the last few % below target are skipped
+        because the charge tapers there anyway."""
+        watching = (
+            self.state.cheap_mode_active
+            and self.state.ac_mode == AC_MODE_INPUT
+            and self.state.soc is not None
+            and self.state.soc < self.state.target_soc - CHARGE_STALL_SOC_MARGIN
+        )
+        if not watching:
+            self._stall_watch_since = None
+            self.state.charge_stalled = False
+            return
+        now = time.monotonic()
+        if self._stall_watch_since is None:
+            self._stall_watch_since = now
+        last_ok = max(self._stall_watch_since, self._charge_seen_ts)
+        stalled = now - last_ok >= CHARGE_STALL_AFTER
+        if stalled and not self.state.charge_stalled:
+            _LOGGER.warning(
+                "charge44: device in %s with inputLimit %s W, but the battery "
+                "has taken < %s W for %d min — the Zendure may need a restart",
+                AC_MODE_INPUT,
+                self.state.charge_power,
+                CHARGE_STALL_W,
+                (now - last_ok) // 60,
+            )
+            self.hass.bus.async_fire(
+                EVENT_CHARGE_STALLED,
+                {
+                    "soc": self.state.soc,
+                    "target_soc": self.state.target_soc,
+                    "charge_power_w": self.state.charge_power,
+                    "battery_charge_w": self.state.pack_input,
+                },
+            )
+        self.state.charge_stalled = stalled
 
     def _read_forecast_kwh(self) -> float | None:
         """Solar kWh still to come before the battery is needed.

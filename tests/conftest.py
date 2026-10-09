@@ -125,6 +125,8 @@ def coord():
     obj._acmode_reconciled = False
     obj._charge_suppressed = False
     obj._charge_hold = False
+    obj._stall_watch_since = None
+    obj._charge_seen_ts = 0.0
     obj._plan = None
     obj._replan_requested = False
     obj._has_current_price = False
