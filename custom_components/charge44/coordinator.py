@@ -54,6 +54,8 @@ from .const import (
     FORECAST_TODAY_DONE_KWH,
     HEARTBEAT_INTERVAL,
     MIN_PUBLISH_INTERVAL,
+    RESERVE_TARGET_ABOVE,
+    RESERVE_TRIGGER_BELOW,
     SAFETY_TICK_INTERVAL,
     SIGNAL_UPDATE,
     STALE_GRID_AFTER,
@@ -139,6 +141,7 @@ class State:
     charge_when_free: bool = False
     manual_charge: bool = False
     cheap_mode_active: bool = False
+    charge_reason: str | None = None  # manual | reserve | free | cheap, while charging
     is_cheap_now: bool = False
     current_price: float | None = None
     next_cheap_start: datetime | None = None
@@ -231,6 +234,7 @@ class Charge44Coordinator:
         self._acmode_reconciled: bool = False
         self._charge_suppressed: bool = False  # stop_charge until the reason ends
         self._charge_hold: bool = False  # target hit, waiting out the hysteresis
+        self._reserve_active: bool = False  # standby-drain top-up below SOC Min
         self._stall_watch_since: float | None = None
         self._charge_seen_ts: float | None = None  # last real charge into the battery
         self._plan: PricePlan | None = None
@@ -1035,15 +1039,34 @@ class Charge44Coordinator:
                 self._charge_hold = True
             elif soc <= target - CHARGE_RESUME_HYSTERESIS:
                 self._charge_hold = False
+        # Standby protection: below SOC Min the regulation parks the output,
+        # but the hub's own ~10 W keeps draining the battery. On 2026-10-08/09
+        # that took it from 5 % to 0 % overnight, and the firmware's deep-
+        # discharge trickle then got stuck. Top up regardless of price.
+        if soc is not None:
+            if soc <= self.state.min_soc - RESERVE_TRIGGER_BELOW:
+                if not self._reserve_active:
+                    _LOGGER.warning(
+                        "charge44: SOC %s%% is %s%% below SOC Min — reserve top-up "
+                        "to %s%% regardless of price",
+                        soc,
+                        RESERVE_TRIGGER_BELOW,
+                        self.state.min_soc + RESERVE_TARGET_ABOVE,
+                    )
+                self._reserve_active = True
+            elif soc >= self.state.min_soc + RESERVE_TARGET_ABOVE:
+                self._reserve_active = False
         want_charge = self._want_cheap_charge(is_cheap)
         # stop_charge: stay off until the reason that would charge has ended.
-        if self._charge_suppressed:
+        # The reserve top-up is a protection and is not suppressed — otherwise
+        # a stop near empty would leave the battery draining indefinitely.
+        if self._charge_suppressed and not self._reserve_active:
             if self._charge_reason(is_cheap):
                 want_charge = False
             else:
                 self._charge_suppressed = False
         if want_charge and not self.state.cheap_mode_active:
-            self._enter_cheap_mode()
+            self._enter_cheap_mode(self._active_reason())
         elif not want_charge and self.state.cheap_mode_active:
             self._exit_cheap_mode()
 
@@ -1059,12 +1082,26 @@ class Charge44Coordinator:
             or (self.state.cheap_charge_enabled and is_cheap)
         )
 
+    def _active_reason(self) -> str:
+        """Why a grid charge is starting — for the event and sensor attribute."""
+        if self.state.manual_charge:
+            return "manual"
+        if self._reserve_active:
+            return "reserve"
+        if (
+            self.state.charge_when_free
+            and self.state.current_price is not None
+            and self.state.current_price <= 0.0
+        ):
+            return "free"
+        return "cheap"
+
     def _want_cheap_charge(self, is_cheap: bool) -> bool:
         if self.state.temperature_guard in ("too_cold", "too_hot"):
             return False
         if self.state.soc is None or self.state.soc >= self.state.target_soc:
             return False
-        if self.state.manual_charge:
+        if self.state.manual_charge or self._reserve_active:
             return True
         if self._charge_hold:
             return False
@@ -1181,13 +1218,15 @@ class Charge44Coordinator:
             value = value / 1000.0
         return value
 
-    def _enter_cheap_mode(self) -> None:
+    def _enter_cheap_mode(self, reason: str = "cheap") -> None:
         _LOGGER.info(
-            "charge44: entering cheap-charge (price=%.3f EUR/kWh, SOC=%s%%)",
+            "charge44: entering cheap-charge (%s, price=%.3f EUR/kWh, SOC=%s%%)",
+            reason,
             self.state.current_price or 0.0,
             self.state.soc,
         )
         self.state.cheap_mode_active = True
+        self.state.charge_reason = reason
         # Zero the output first: if the acMode write is dropped, the device
         # would otherwise keep discharging at the last regulation value while
         # the regulation is paused.
@@ -1202,12 +1241,14 @@ class Charge44Coordinator:
                 "soc": self.state.soc,
                 "target_soc": self.state.target_soc,
                 "charge_power_w": self.state.charge_power,
+                "reason": reason,
             },
         )
 
     def _exit_cheap_mode(self) -> None:
         _LOGGER.info("charge44: leaving cheap-charge")
         self.state.cheap_mode_active = False
+        self.state.charge_reason = None
         self._publish_input_limit(0)
         self._publish_ac_mode(AC_MODE_OUTPUT)
         self.state.setpoint = 0.0

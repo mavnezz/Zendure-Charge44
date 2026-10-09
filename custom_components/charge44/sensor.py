@@ -168,6 +168,7 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
         key="cheap_mode_active",
         name="Cheap-charge active",
         value_fn=lambda s: "on" if s.cheap_mode_active else "off",
+        attrs_fn=lambda s: {"reason": s.charge_reason} if s.charge_reason else {},
     ),
     Charge44SensorDescription(
         key="next_cheap_start",

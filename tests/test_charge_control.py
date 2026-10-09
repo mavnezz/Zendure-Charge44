@@ -315,3 +315,78 @@ def test_no_watch_outside_cheap_mode(charging):
     charging._stall_watch_since = time.monotonic() - 600
     charging._check_charge_stall()
     assert charging.state.charge_stalled is False
+
+
+# --- standby protection: reserve top-up below SOC Min ---------------------
+
+@pytest.fixture
+def reserve(ctl):
+    """Nothing else wants to charge: cheap/free/manual all off, price high."""
+    ctl.state.min_soc = 10
+    ctl.state.target_soc = 100
+    ctl.state.current_price = 0.35
+    ctl.hass.bus.async_fire.reset_mock()
+    return ctl
+
+
+def _started_reasons(coord):
+    return [
+        c.args[1]["reason"]
+        for c in coord.hass.bus.async_fire.call_args_list
+        if c.args[0] == "charge44_cheap_charge_started"
+    ]
+
+
+def test_reserve_tops_up_three_below_soc_min(reserve):
+    reserve.state.soc = 7
+    reserve._apply_mode(is_cheap=False)
+    assert reserve.state.cheap_mode_active is True
+    assert reserve.state.charge_reason == "reserve"
+    assert _started_reasons(reserve) == ["reserve"]
+
+
+def test_no_reserve_just_below_soc_min(reserve):
+    reserve.state.soc = 8
+    reserve._apply_mode(is_cheap=False)
+    assert reserve.state.cheap_mode_active is False
+
+
+def test_reserve_runs_until_three_above_soc_min(reserve):
+    for soc, active in [(7, True), (10, True), (12, True), (13, False)]:
+        reserve.state.soc = soc
+        reserve._apply_mode(is_cheap=False)
+        assert reserve.state.cheap_mode_active is active, soc
+    assert reserve.state.charge_reason is None
+
+
+def test_reserve_blocked_by_temperature_guard(reserve):
+    reserve.state.temperature_guard = "too_cold"
+    reserve.state.soc = 5
+    reserve._apply_mode(is_cheap=False)
+    assert reserve.state.cheap_mode_active is False
+
+
+def test_stop_charge_does_not_block_reserve(reserve):
+    reserve.state.soc = 6
+    reserve._apply_mode(is_cheap=False)
+    asyncio.run(reserve.service_stop_charge())
+    assert reserve.state.cheap_mode_active is True
+
+
+def test_reserve_ignores_target_hysteresis(reserve):
+    reserve._charge_hold = True  # left over from an earlier full charge
+    reserve.state.soc = 7
+    reserve._apply_mode(is_cheap=False)
+    assert reserve.state.cheap_mode_active is True
+
+
+def test_soc_min_zero_disables_reserve(reserve):
+    reserve.state.min_soc = 0
+    reserve.state.soc = 0
+    reserve._apply_mode(is_cheap=False)
+    assert reserve.state.cheap_mode_active is False
+
+
+def test_manual_reason_reported(reserve):
+    reserve.set_manual_charge(True)
+    assert reserve.state.charge_reason == "manual"
