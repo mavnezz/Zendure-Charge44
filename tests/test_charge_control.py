@@ -43,7 +43,7 @@ def _set_prices(coord, values):
     ]
 
 
-CHEAP_NOW = [0.05] * 3 + [0.40] * 21
+CHEAP_NOW = [0.04, 0.05, 0.05] + [0.40] * 21  # this hour is the cheapest
 EXPENSIVE_NOW = [0.40] * 24
 
 
@@ -77,30 +77,32 @@ def test_stop_charge_after_force_charge_stays_stopped(ctl):
     assert ctl.state.cheap_mode_active is False
 
 
-def test_stop_charge_holds_until_cheap_window_ends(ctl):
-    ctl.state.cheap_charge_enabled = True
-    _set_prices(ctl, CHEAP_NOW)
+def _plan(ctl, prices):
+    _set_prices(ctl, prices)
+    ctl.plan_now()
     ctl._evaluate()
+
+
+def test_stop_charge_holds_until_planned_charge_ends(ctl):
+    ctl.state.optimizer_enabled = True
+    _plan(ctl, CHEAP_NOW)
     assert ctl.state.cheap_mode_active is True
 
     asyncio.run(ctl.service_stop_charge())
     assert ctl.state.cheap_mode_active is False
-    ctl._evaluate()  # still cheap — must not restart
+    ctl._evaluate()  # plan still says charge — must not restart
     assert ctl.state.cheap_mode_active is False
 
-    _set_prices(ctl, EXPENSIVE_NOW)  # window over
-    ctl._evaluate()
+    _plan(ctl, EXPENSIVE_NOW)  # nothing to charge any more
     assert ctl._charge_suppressed is False
 
-    _set_prices(ctl, CHEAP_NOW)  # a later cheap window charges normally
-    ctl._evaluate()
+    _plan(ctl, CHEAP_NOW)  # a later planned charge runs normally
     assert ctl.state.cheap_mode_active is True
 
 
 def test_manual_charge_lifts_stop(ctl):
-    ctl.state.cheap_charge_enabled = True
-    _set_prices(ctl, CHEAP_NOW)
-    ctl._evaluate()
+    ctl.state.optimizer_enabled = True
+    _plan(ctl, CHEAP_NOW)
     asyncio.run(ctl.service_stop_charge())
     assert ctl.state.cheap_mode_active is False
     ctl.set_manual_charge(True)
@@ -123,50 +125,6 @@ def test_set_target_soc_service_forwards_soc_set(ctl):
 def test_set_target_soc_service_clamps_to_slider_range(ctl):
     asyncio.run(ctl.service_set_target_soc(30))
     assert ctl.state.target_soc == 51
-
-
-# --- point 4: hysteresis at the target ------------------------------------
-
-def test_no_reentry_until_hysteresis_band(ctl):
-    """79→charge, 80→stop, then wait until 77 before charging again."""
-    ctl.state.cheap_charge_enabled = True
-    for soc, active in [
-        (79, True),
-        (80, False),
-        (79, False),
-        (78, False),
-        (77, True),
-        (80, False),
-    ]:
-        ctl.state.soc = soc
-        ctl._apply_mode(is_cheap=True)
-        assert ctl.state.cheap_mode_active is active, soc
-
-
-def test_hysteresis_also_applies_to_free_charge(ctl):
-    ctl.state.charge_when_free = True
-    ctl.state.current_price = -0.01
-    ctl.state.soc = 80
-    ctl._apply_mode(is_cheap=False)
-    ctl.state.soc = 79
-    ctl._apply_mode(is_cheap=False)
-    assert ctl.state.cheap_mode_active is False
-
-
-def test_manual_charge_ignores_hysteresis(ctl):
-    ctl._charge_hold = True
-    ctl.state.soc = 79
-    ctl.state.manual_charge = True
-    assert ctl._want_cheap_charge(is_cheap=False) is True
-
-
-def test_raising_target_releases_hold(ctl):
-    ctl.state.cheap_charge_enabled = True
-    ctl.state.soc = 80
-    ctl._apply_mode(is_cheap=True)  # target hit → hold
-    ctl.state.target_soc = 90
-    ctl._apply_mode(is_cheap=True)
-    assert ctl.state.cheap_mode_active is True
 
 
 # --- point 7: cheap-mode entry zeroes the output --------------------------
@@ -339,7 +297,7 @@ def _started_reasons(coord):
 
 def test_reserve_tops_up_three_below_soc_min(reserve):
     reserve.state.soc = 7
-    reserve._apply_mode(is_cheap=False)
+    reserve._apply_mode()
     assert reserve.state.cheap_mode_active is True
     assert reserve.state.charge_reason == "reserve"
     assert _started_reasons(reserve) == ["reserve"]
@@ -347,14 +305,14 @@ def test_reserve_tops_up_three_below_soc_min(reserve):
 
 def test_no_reserve_just_below_soc_min(reserve):
     reserve.state.soc = 8
-    reserve._apply_mode(is_cheap=False)
+    reserve._apply_mode()
     assert reserve.state.cheap_mode_active is False
 
 
 def test_reserve_runs_until_three_above_soc_min(reserve):
     for soc, active in [(7, True), (10, True), (12, True), (13, False)]:
         reserve.state.soc = soc
-        reserve._apply_mode(is_cheap=False)
+        reserve._apply_mode()
         assert reserve.state.cheap_mode_active is active, soc
     assert reserve.state.charge_reason is None
 
@@ -362,28 +320,21 @@ def test_reserve_runs_until_three_above_soc_min(reserve):
 def test_reserve_blocked_by_temperature_guard(reserve):
     reserve.state.temperature_guard = "too_cold"
     reserve.state.soc = 5
-    reserve._apply_mode(is_cheap=False)
+    reserve._apply_mode()
     assert reserve.state.cheap_mode_active is False
 
 
 def test_stop_charge_does_not_block_reserve(reserve):
     reserve.state.soc = 6
-    reserve._apply_mode(is_cheap=False)
+    reserve._apply_mode()
     asyncio.run(reserve.service_stop_charge())
-    assert reserve.state.cheap_mode_active is True
-
-
-def test_reserve_ignores_target_hysteresis(reserve):
-    reserve._charge_hold = True  # left over from an earlier full charge
-    reserve.state.soc = 7
-    reserve._apply_mode(is_cheap=False)
     assert reserve.state.cheap_mode_active is True
 
 
 def test_soc_min_zero_disables_reserve(reserve):
     reserve.state.min_soc = 0
     reserve.state.soc = 0
-    reserve._apply_mode(is_cheap=False)
+    reserve._apply_mode()
     assert reserve.state.cheap_mode_active is False
 
 

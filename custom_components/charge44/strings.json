@@ -16,14 +16,14 @@
       },
       "tibber": {
         "title": "Tibber + solar forecast (optional)",
-        "description": "Enter your Tibber API token for price-based charging. Pick a solar forecast sensor so cheap-charge is skipped when the sun will fill the battery anyway. Both optional — leave empty to skip.",
+        "description": "Enter your Tibber API token for price-based charging. Pick solar forecast sensors (remaining today, tomorrow) so the optimizer can plan around the sun. All optional — leave empty to skip.",
         "data": {
           "tibber_token": "Tibber API token",
           "forecast_entity": "Solar forecast entity (remaining today, kWh)",
           "forecast_tomorrow_entity": "Solar forecast entity (tomorrow, kWh — optional)"
         },
         "data_description": {
-          "forecast_tomorrow_entity": "Used in the evening, once no more PV is expected today: a cheap slot before midnight then checks tomorrow's sun instead of charging from grid."
+          "forecast_tomorrow_entity": "Tomorrow's PV total. The optimizer spreads it over tomorrow's daylight and plans tonight's grid charging around it."
         }
       },
       "tibber_home": {
@@ -52,7 +52,7 @@
           "forecast_tomorrow_entity": "Solar forecast entity (tomorrow)"
         },
         "data_description": {
-          "forecast_tomorrow_entity": "Used in the evening, once no more PV is expected today: a cheap slot before midnight then checks tomorrow's sun instead of charging from grid."
+          "forecast_tomorrow_entity": "Tomorrow's PV total. The optimizer spreads it over tomorrow's daylight and plans tonight's grid charging around it."
         }
       },
       "pick_home": {

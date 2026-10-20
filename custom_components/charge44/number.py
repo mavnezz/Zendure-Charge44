@@ -16,7 +16,6 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from .const import (
     DEFAULT_FALLBACK_DISCHARGE,
     DEFAULT_MIN_SOC,
-    DEFAULT_MIN_SPREAD_CT,
     DEFAULT_TARGET_SOC,
     DEFAULT_TEMP_HIGH,
     DEFAULT_TEMP_LOW,
@@ -36,9 +35,9 @@ class Charge44NumberDescription(NumberEntityDescription):
 # Deliberately minimal user-facing control surface:
 #   - Only what a user has to decide daily (target/min SOC) stays top-level.
 #   - Temperature guards live under the "Configuration" section (set-and-forget).
-# Everything else (cheap/expensive hours, grid bias, Kp, min spread, efficiency,
-# charge power, max output, battery capacity) is either hard-coded to a sensible
-# default or auto-detected from Zendure telemetry — see coordinator.py.
+# Everything else (grid bias, Kp, charge power, max output, battery capacity,
+# round-trip efficiency, load profile) is hard-coded to a sensible default,
+# measured, or auto-detected from Zendure telemetry — see coordinator.py.
 NUMBERS: tuple[Charge44NumberDescription, ...] = (
     Charge44NumberDescription(
         key="target_soc",
@@ -61,17 +60,6 @@ NUMBERS: tuple[Charge44NumberDescription, ...] = (
         mode=NumberMode.SLIDER,
         state_key="min_soc",
         default=DEFAULT_MIN_SOC,
-    ),
-    Charge44NumberDescription(
-        key="min_spread",
-        name="Price Spread",
-        native_min_value=0,
-        native_max_value=50,
-        native_step=1,
-        native_unit_of_measurement="ct/kWh",
-        mode=NumberMode.SLIDER,
-        state_key="min_spread_ct",
-        default=DEFAULT_MIN_SPREAD_CT,
     ),
     Charge44NumberDescription(
         key="fallback_discharge",

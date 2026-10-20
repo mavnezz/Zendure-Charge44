@@ -160,32 +160,48 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
         attrs_fn=lambda s: {"prices_24h": s.prices_24h} if s.prices_24h else {},
     ),
     Charge44SensorDescription(
-        key="is_cheap_now",
-        name="Cheap hour",
-        value_fn=lambda s: "yes" if s.is_cheap_now else "no",
-    ),
-    Charge44SensorDescription(
         key="cheap_mode_active",
-        name="Cheap-charge active",
+        name="Grid charging",
         value_fn=lambda s: "on" if s.cheap_mode_active else "off",
         attrs_fn=lambda s: {"reason": s.charge_reason} if s.charge_reason else {},
     ),
     Charge44SensorDescription(
         key="next_cheap_start",
-        name="Next cheap window",
+        name="Next grid charge",
         device_class=SensorDeviceClass.TIMESTAMP,
-        value_fn=lambda s: s.next_cheap_start,
+        value_fn=lambda s: s.next_charge_start,
     ),
     Charge44SensorDescription(
-        key="is_expensive_now",
-        name="Expensive hour",
-        value_fn=lambda s: "yes" if s.is_expensive_now else "no",
+        key="plan_action",
+        name="Planned action",
+        value_fn=lambda s: s.plan_action,
+        attrs_fn=lambda s: (
+            {
+                "plan": s.plan,
+                "plan_cost_eur": s.plan_cost_eur,
+                "baseline_cost_eur": s.plan_baseline_eur,
+            }
+            if s.plan
+            else {}
+        ),
     ),
     Charge44SensorDescription(
-        key="next_expensive_start",
-        name="Next expensive window",
-        device_class=SensorDeviceClass.TIMESTAMP,
-        value_fn=lambda s: s.next_expensive_start,
+        key="round_trip_efficiency",
+        name="Round-trip efficiency",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda s: s.round_trip_efficiency,
+    ),
+    Charge44SensorDescription(
+        key="load_forecast",
+        name="House load forecast",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda s: s.load_now_w,
+        attrs_fn=lambda s: {"profile": s.load_profile} if s.load_profile else {},
     ),
     Charge44SensorDescription(
         key="solar_remaining_kwh",
@@ -196,12 +212,12 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
         value_fn=lambda s: s.solar_remaining_kwh,
     ),
     Charge44SensorDescription(
-        key="grid_charge_needed_kwh",
-        name="Grid charge needed",
+        key="solar_tomorrow_kwh",
+        name="Solar forecast tomorrow",
         native_unit_of_measurement="kWh",
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=2,
-        value_fn=lambda s: s.grid_charge_needed_kwh,
+        value_fn=lambda s: s.solar_tomorrow_kwh,
     ),
     Charge44SensorDescription(
         key="battery_capacity",
@@ -228,27 +244,6 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=2,
         value_fn=lambda s: s.today_min_price,
-    ),
-    Charge44SensorDescription(
-        key="spread_now_ct",
-        name="Spread now",
-        native_unit_of_measurement="ct/kWh",
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=2,
-        value_fn=lambda s: s.spread_now_ct,
-    ),
-    Charge44SensorDescription(
-        key="required_spread_ct",
-        name="Required spread",
-        native_unit_of_measurement="ct/kWh",
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=2,
-        value_fn=lambda s: s.required_spread_ct,
-    ),
-    Charge44SensorDescription(
-        key="profitable_now",
-        name="Charge profitable",
-        value_fn=lambda s: "yes" if s.profitable_now else "no",
     ),
     # Health / guard diagnostics
     Charge44SensorDescription(
@@ -326,13 +321,14 @@ async def async_setup_entry(
         Charge44CostSensor(coordinator, key, name, state_key, daily)
         for key, name, state_key, daily in COST_SENSORS
     )
+    entities.append(Charge44CostBasisSensor(coordinator))
     async_add_entities(entities)
 
 
 class Charge44Sensor(Charge44Entity, SensorEntity):
     entity_description: Charge44SensorDescription
-    # The 96-slot price list is for dashboard cards, not for the database.
-    _unrecorded_attributes = frozenset({"prices_24h"})
+    # Price list, plan and load profile are for dashboard cards, not the database.
+    _unrecorded_attributes = frozenset({"prices_24h", "plan", "profile"})
 
     def __init__(
         self, coordinator: Charge44Coordinator, description: Charge44SensorDescription
@@ -443,3 +439,30 @@ class Charge44CostSensor(Charge44Entity, RestoreSensor):
     def last_reset(self) -> datetime | None:
         return self.coordinator.today_start() if self._daily else None
 
+
+class Charge44CostBasisSensor(Charge44Entity, RestoreSensor):
+    """Average cost of the energy in the battery: grid charges at their price,
+    PV at 0 €. The ledger (EUR) is persisted as an attribute."""
+
+    _attr_native_unit_of_measurement = "ct/kWh"
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, coordinator: Charge44Coordinator) -> None:
+        super().__init__(coordinator, "cost_basis", "Battery cost basis")
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is not None:
+            try:
+                self.coordinator.restore_ledger(float(last.attributes["ledger_eur"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+
+    @property
+    def native_value(self) -> Any:
+        return self.coordinator.state.cost_basis_ct
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"ledger_eur": round(self.coordinator.state.ledger_eur, 4)}

@@ -4,7 +4,6 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -23,11 +22,8 @@ async def async_setup_entry(
     async_add_entities(
         [
             Charge44RegulationSwitch(coordinator),
-            Charge44CheapChargeSwitch(coordinator),
-            Charge44ChargeWhenFreeSwitch(coordinator),
+            Charge44OptimizerSwitch(coordinator),
             Charge44ManualChargeSwitch(coordinator),
-            Charge44SmartDischargeSwitch(coordinator),
-            Charge44ContiguousBlockSwitch(coordinator),
         ]
     )
 
@@ -54,48 +50,29 @@ class Charge44RegulationSwitch(Charge44Entity, SwitchEntity, RestoreEntity):
         self.coordinator.set_enabled(False)
 
 
-class Charge44CheapChargeSwitch(Charge44Entity, SwitchEntity, RestoreEntity):
+class Charge44OptimizerSwitch(Charge44Entity, SwitchEntity, RestoreEntity):
+    """Price optimizer on/off. Keeps the old "cheap_charge" key so the entity
+    ID — and automations using it — survive the switch to the optimizer."""
+
     def __init__(self, coordinator: Charge44Coordinator) -> None:
-        super().__init__(coordinator, "cheap_charge", "Charge Cheap")
+        super().__init__(coordinator, "cheap_charge", "Optimizer")
         self._attr_is_on = False
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
         if last is not None and last.state == "on":
-            self.coordinator.set_cheap_enabled(True)
+            self.coordinator.set_optimizer_enabled(True)
 
     @property
     def is_on(self) -> bool:
-        return self.coordinator.state.cheap_charge_enabled
+        return self.coordinator.state.optimizer_enabled
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        self.coordinator.set_cheap_enabled(True)
+        self.coordinator.set_optimizer_enabled(True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        self.coordinator.set_cheap_enabled(False)
-
-
-class Charge44ChargeWhenFreeSwitch(Charge44Entity, SwitchEntity, RestoreEntity):
-    def __init__(self, coordinator: Charge44Coordinator) -> None:
-        super().__init__(coordinator, "charge_when_free", "Charge Free")
-        self._attr_is_on = False
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        last = await self.async_get_last_state()
-        if last is not None and last.state == "on":
-            self.coordinator.set_charge_when_free(True)
-
-    @property
-    def is_on(self) -> bool:
-        return self.coordinator.state.charge_when_free
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        self.coordinator.set_charge_when_free(True)
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        self.coordinator.set_charge_when_free(False)
+        self.coordinator.set_optimizer_enabled(False)
 
 
 class Charge44ManualChargeSwitch(Charge44Entity, SwitchEntity, RestoreEntity):
@@ -118,49 +95,3 @@ class Charge44ManualChargeSwitch(Charge44Entity, SwitchEntity, RestoreEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         self.coordinator.set_manual_charge(False)
-
-
-class Charge44SmartDischargeSwitch(Charge44Entity, SwitchEntity, RestoreEntity):
-    def __init__(self, coordinator: Charge44Coordinator) -> None:
-        super().__init__(coordinator, "smart_discharge", "Discharge Smart")
-        self._attr_is_on = False
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        last = await self.async_get_last_state()
-        if last is not None and last.state == "on":
-            self.coordinator.set_smart_discharge(True)
-
-    @property
-    def is_on(self) -> bool:
-        return self.coordinator.state.smart_discharge_enabled
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        self.coordinator.set_smart_discharge(True)
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        self.coordinator.set_smart_discharge(False)
-
-
-class Charge44ContiguousBlockSwitch(Charge44Entity, SwitchEntity, RestoreEntity):
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(self, coordinator: Charge44Coordinator) -> None:
-        super().__init__(coordinator, "contiguous_block", "Contiguous block mode")
-        self._attr_is_on = False
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        last = await self.async_get_last_state()
-        if last is not None and last.state == "on":
-            self.coordinator.set_contiguous_block(True)
-
-    @property
-    def is_on(self) -> bool:
-        return self.coordinator.state.contiguous_block_mode
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        self.coordinator.set_contiguous_block(True)
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        self.coordinator.set_contiguous_block(False)
