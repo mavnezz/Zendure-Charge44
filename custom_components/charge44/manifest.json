@@ -4,10 +4,11 @@
   "codeowners": ["@mavnezz"],
   "config_flow": true,
   "dependencies": ["mqtt"],
+  "after_dependencies": ["recorder"],
   "documentation": "https://github.com/mavnezz/Zendure-Charge44",
   "integration_type": "hub",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/mavnezz/Zendure-Charge44/issues",
   "requirements": [],
-  "version": "0.11.3"
+  "version": "0.12.0"
 }
