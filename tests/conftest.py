@@ -28,6 +28,7 @@ for name in (
     "homeassistant.helpers",
     "homeassistant.helpers.aiohttp_client",
     "homeassistant.helpers.dispatcher",
+    "homeassistant.helpers.entity_registry",
     "homeassistant.helpers.event",
     "homeassistant.util",
     "homeassistant.util.dt",
@@ -107,6 +108,7 @@ import pytest
 def coord():
     """Build a Charge44Coordinator with __new__ — no HA setup, fresh State."""
     from charge44.coordinator import Charge44Coordinator, State
+    from charge44.load_profile import LoadProfile
 
     obj = Charge44Coordinator.__new__(Charge44Coordinator)
     obj.state = State()
@@ -124,13 +126,19 @@ def coord():
     obj._acmode_forced = None
     obj._acmode_reconciled = False
     obj._charge_suppressed = False
-    obj._charge_hold = False
     obj._reserve_active = False
     obj._stall_watch_since = None
     obj._charge_seen_ts = None
-    obj._plan = None
+    obj._load = LoadProfile()
+    obj._plan_steps = []
+    obj._plan_slot = None
+    obj._plan_soc = None
+    obj._plan_horizon = None
+    obj._planning = False
     obj._replan_requested = False
     obj._has_current_price = False
     obj._last_price_ok_ts = 0.0
+    # Planning runs in an executor task in HA; tests call plan_now() instead.
+    obj._request_plan = lambda *args: None
     obj._publish_calls = []
     return obj

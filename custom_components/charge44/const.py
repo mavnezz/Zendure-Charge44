@@ -26,6 +26,7 @@ ZENDURE_SENSORS = (
     "solarInputPower",
     "packInputPower",
     "outputPackPower",
+    "gridInputPower",
     "hyperTmp",
     "packState",
     "packNum",
@@ -51,20 +52,20 @@ ACMODE_RETRY_INTERVAL = 10.0   # s, min gap between acMode writes — gives the
                                # self-heal treats it as stuck
 DEFAULT_FALLBACK_DISCHARGE = 0  # W, outputLimit when Shelly stops reporting
 
-# Cheap-charge defaults
-DEFAULT_CHEAP_HOURS = 6                   # charge during N cheapest hours of 24h
+# Grid-charge / optimizer defaults
 DEFAULT_TARGET_SOC = 80                   # stop charging when SOC reaches this
 TARGET_SOC_MIN = 51                       # %, floor for SOC Max — keeps it above SOC Min (max 50)
-DEFAULT_CHARGE_POWER = 1000               # inputLimit (W) during cheap-charge — Zendure clamps to App's "On-grid Input Mode" value
-DEFAULT_MIN_SPREAD_CT = 10.0              # ct/kWh min gap (today_max - current) for profitable charge
-DEFAULT_EFFICIENCY = 85                   # % round-trip efficiency used to compute break-even
-CHARGE_RESUME_HYSTERESIS = 3              # %, after hitting target SOC, auto-charge resumes only at target - N
+DEFAULT_CHARGE_POWER = 1000               # inputLimit (W) during a grid charge — Zendure clamps to App's "On-grid Input Mode" value
+DEFAULT_EFFICIENCY = 85                   # % round trip until the counters have seen EFFICIENCY_MIN_KWH
+EFFICIENCY_MIN_KWH = 50.0                 # kWh charged before the measured round trip is trusted
+OPTIMIZER_STEP_WH = 20.0                  # Wh, stored-energy resolution of the optimizer
+REPLAN_SOC_DELTA = 3                      # %, SOC drift from the plan's assumption that triggers a re-plan
+LOAD_SEED_DAYS = 28                       # days of recorder statistics that seed the weekday load profile
 RESERVE_TRIGGER_BELOW = 3                 # %, SOC this far below SOC Min → grid top-up regardless of price
 RESERVE_TARGET_ABOVE = 3                  # %, ...until SOC is this far above SOC Min
 CHARGE_STALL_W = 100                      # W, battery charge power that counts as "actually charging"
 CHARGE_STALL_AFTER = 300                  # s, Input mode confirmed but below CHARGE_STALL_W this long → stalled
 CHARGE_STALL_SOC_MARGIN = 5               # %, don't judge the last N % below target (charge tapers there)
-FORECAST_TODAY_DONE_KWH = 0.1             # kWh, below this "remaining today" counts as no more PV today
 DEFAULT_BATTERY_CAPACITY = 1.92           # kWh (1 × AB2000X)
 DEFAULT_TEMP_LOW = 5.0                    # °C, pause below
 DEFAULT_TEMP_HIGH = 45.0                  # °C, pause above

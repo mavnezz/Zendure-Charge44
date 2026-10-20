@@ -86,14 +86,13 @@ def test_soc_below_min_forces_zero(regulating):
     assert regulating._publish_calls == [0]
 
 
-# --- smart-discharge: cheap-hour battery preservation ----------------------
+# --- optimizer "hold": keep the battery for pricier slots ------------------
 
-def test_smart_discharge_in_cheap_hour_pauses_output(regulating):
-    """v0.10.5: with a feed-in tariff of zero, exporting is pure loss. The
-    smart-discharge switch now means 'preserve battery during cheap hours'
-    so cheap grid covers the home directly."""
-    regulating.state.smart_discharge_enabled = True
-    regulating.state.is_cheap_now = True
+def test_optimizer_hold_pauses_output(regulating):
+    """The plan says hold: the house runs on grid, the battery waits for the
+    expensive slots."""
+    regulating.state.optimizer_enabled = True
+    regulating.state.plan_action = "hold"
     regulating.state.grid_power = 200.0  # home pulling from grid
     regulating.state.setpoint = 150.0  # was discharging; should stop
     regulating._tick()
@@ -101,38 +100,26 @@ def test_smart_discharge_in_cheap_hour_pauses_output(regulating):
     assert regulating.state.setpoint == 0.0
 
 
-def test_smart_discharge_in_expensive_hour_runs_pi_zero_export(regulating):
-    """During expensive hours we still cover home load — but never export."""
-    regulating.state.smart_discharge_enabled = True
-    regulating.state.is_cheap_now = False
-    regulating.state.is_expensive_now = True
-    regulating.state.grid_power = 200.0
-    regulating._tick()
-    # Standard PI loop: 0 + 200 * 0.5 = 100 (zero-export, no max-pin)
-    assert regulating._publish_calls == [100]
-
-
-def test_smart_discharge_in_normal_hour_runs_pi(regulating):
-    regulating.state.smart_discharge_enabled = True
-    regulating.state.is_cheap_now = False
-    regulating.state.is_expensive_now = False
+def test_optimizer_normal_runs_pi_zero_export(regulating):
+    regulating.state.optimizer_enabled = True
+    regulating.state.plan_action = "normal"
     regulating.state.grid_power = 200.0
     regulating._tick()
     assert regulating._publish_calls == [100]
 
 
-def test_smart_discharge_off_ignores_cheap_hour(regulating):
-    """With the switch off, the regulation runs regardless of price."""
-    regulating.state.smart_discharge_enabled = False
-    regulating.state.is_cheap_now = True
+def test_stale_hold_ignored_with_optimizer_off(regulating):
+    """With the optimizer off the regulation runs regardless of the last plan."""
+    regulating.state.optimizer_enabled = False
+    regulating.state.plan_action = "hold"
     regulating.state.grid_power = 200.0
     regulating._tick()
     assert regulating._publish_calls == [100]
 
 
-def test_smart_discharge_idempotent_when_already_paused(regulating):
-    regulating.state.smart_discharge_enabled = True
-    regulating.state.is_cheap_now = True
+def test_optimizer_hold_idempotent_when_already_paused(regulating):
+    regulating.state.optimizer_enabled = True
+    regulating.state.plan_action = "hold"
     regulating._last_published = 0
     regulating.state.setpoint = 0.0
     regulating._tick()

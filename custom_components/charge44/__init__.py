@@ -6,6 +6,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     CONF_ZENDURE_BATTERY_SNS,
@@ -24,8 +25,26 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.SENSOR, Platform.NUMBER, Platform.SWITCH]
 
+# Entity keys the price optimizer (v0.12) replaced — removed from the registry
+# so they don't linger as "unavailable".
+_OBSOLETE_KEYS = (
+    ("sensor", "is_cheap_now"),
+    ("sensor", "is_expensive_now"),
+    ("sensor", "next_expensive_start"),
+    ("sensor", "grid_charge_needed_kwh"),
+    ("sensor", "spread_now_ct"),
+    ("sensor", "required_spread_ct"),
+    ("sensor", "profitable_now"),
+    ("sensor", "house_load_avg"),
+    ("switch", "charge_when_free"),
+    ("switch", "smart_discharge"),
+    ("switch", "contiguous_block"),
+    ("number", "min_spread"),
+)
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    _remove_obsolete_entities(hass, entry)
     coordinator = Charge44Coordinator(hass, entry)
     await coordinator.async_start()
 
@@ -64,6 +83,17 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         await remove_zendure_discovery(hass, sn, battery_sns)
     except Exception as err:
         _LOGGER.warning("charge44: discovery cleanup failed: %s", err)
+
+
+def _remove_obsolete_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    registry = er.async_get(hass)
+    for domain, key in _OBSOLETE_KEYS:
+        entity_id = registry.async_get_entity_id(
+            domain, DOMAIN, f"{entry.entry_id}_{key}"
+        )
+        if entity_id:
+            registry.async_remove(entity_id)
+            _LOGGER.info("charge44: removed obsolete entity %s", entity_id)
 
 
 async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:

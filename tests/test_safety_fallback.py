@@ -91,11 +91,11 @@ def test_min_soc_blocks_safety(safety):
     assert safety._publish_calls == []
 
 
-def test_smart_discharge_in_cheap_hour_overrides_safety(safety):
-    """User explicitly opted to preserve the battery during cheap hours;
-    that intent beats the safety fallback."""
-    safety.state.smart_discharge_enabled = True
-    safety.state.is_cheap_now = True
+def test_optimizer_hold_overrides_safety(safety):
+    """The plan keeps the battery for pricier slots; that beats the safety
+    fallback."""
+    safety.state.optimizer_enabled = True
+    safety.state.plan_action = "hold"
     safety.state.grid_power_ts = time.monotonic() - 30
     safety._periodic_safety(None)
     assert safety._publish_calls == []

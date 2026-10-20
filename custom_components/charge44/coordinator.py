@@ -19,7 +19,6 @@ from .const import (
     AC_MODE_INPUT,
     AC_MODE_OUTPUT,
     ACMODE_RETRY_INTERVAL,
-    CHARGE_RESUME_HYSTERESIS,
     CHARGE_STALL_AFTER,
     CHARGE_STALL_SOC_MARGIN,
     CHARGE_STALL_W,
@@ -32,7 +31,6 @@ from .const import (
     CONF_ZENDURE_SN,
     DEFAULT_BATTERY_CAPACITY,
     DEFAULT_CHARGE_POWER,
-    DEFAULT_CHEAP_HOURS,
     DEFAULT_DEADZONE,
     DEFAULT_EFFICIENCY,
     DEFAULT_FALLBACK_DISCHARGE,
@@ -40,20 +38,23 @@ from .const import (
     DEFAULT_KP,
     DEFAULT_MAX_OUTPUT,
     DEFAULT_MIN_SOC,
-    DEFAULT_MIN_SPREAD_CT,
     DEFAULT_TARGET_SOC,
     DEFAULT_TEMP_HIGH,
     DEFAULT_TEMP_LOW,
     DRIFT_TOLERANCE_W,
     DRIFT_WARN_THRESHOLD,
+    DOMAIN,
+    EFFICIENCY_MIN_KWH,
     EVENT_CHEAP_CHARGE_ENDED,
     EVENT_CHEAP_CHARGE_STARTED,
     EVENT_CHARGE_STALLED,
     EVENT_DRIFT_DETECTED,
     EVENT_TEMPERATURE_GUARD,
-    FORECAST_TODAY_DONE_KWH,
     HEARTBEAT_INTERVAL,
+    LOAD_SEED_DAYS,
     MIN_PUBLISH_INTERVAL,
+    OPTIMIZER_STEP_WH,
+    REPLAN_SOC_DELTA,
     RESERVE_TARGET_ABOVE,
     RESERVE_TRIGGER_BELOW,
     SAFETY_TICK_INTERVAL,
@@ -72,6 +73,19 @@ from .const import (
     ZENDURE_SENSORS,
 )
 from .discovery import clear_legacy_discovery, pack_info, publish_zendure_discovery
+from .load_profile import LoadProfile
+from .optimizer import (
+    CHARGE,
+    HOLD,
+    NORMAL,
+    Battery,
+    Slot,
+    Step,
+    baseline_cost,
+    distribute_pv,
+    optimise,
+    slot_bounds,
+)
 from .tibber_api import TibberApiClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -87,6 +101,7 @@ _ZENDURE_FIELDS = (
     "solar_input",
     "pack_input",
     "pack_output",
+    "grid_input_power",
     "pack_state",
     "ac_mode",
     "temperature",
@@ -97,16 +112,6 @@ _ZENDURE_FIELDS = (
     "drift_count",
     "drift_active",
 )
-
-
-@dataclass(frozen=True)
-class PricePlan:
-    """Cheap slots chosen from one price snapshot. Frozen until new day-ahead
-    prices arrive, so a started block can't be dropped by a re-pick on the
-    shrinking remainder of the window."""
-
-    cheap_starts: frozenset[datetime]
-    horizon: datetime  # latest known slot start when the plan was built
 
 
 @dataclass
@@ -122,6 +127,7 @@ class State:
     solar_input: float | None = None
     pack_input: float | None = None
     pack_output: float | None = None
+    grid_input_power: float | None = None  # AC drawn from grid by the device
     pack_state: str | None = None
     ac_mode: str | None = None  # device mirror: "Output mode" | "Input mode"
     temperature: float | None = None
@@ -136,37 +142,40 @@ class State:
     deadzone: int = DEFAULT_DEADZONE
     fallback_discharge: int = DEFAULT_FALLBACK_DISCHARGE
 
-    # Cheap-charge state
-    cheap_charge_enabled: bool = False
-    charge_when_free: bool = False
+    # Grid charging (optimizer / manual / reserve)
+    optimizer_enabled: bool = False
     manual_charge: bool = False
-    cheap_mode_active: bool = False
-    charge_reason: str | None = None  # manual | reserve | free | cheap, while charging
-    is_cheap_now: bool = False
+    cheap_mode_active: bool = False  # device in Input mode, grid-charging
+    charge_reason: str | None = None  # manual | reserve | optimizer, while charging
     current_price: float | None = None
-    next_cheap_start: datetime | None = None
     today_prices: list[dict[str, Any]] = field(default_factory=list)
     tomorrow_prices: list[dict[str, Any]] = field(default_factory=list)
     slot_minutes: int = 60  # detected from price spacing; 15 for QUARTER_HOURLY
-
-    # Cheap-charge settings
-    cheap_hours: int = DEFAULT_CHEAP_HOURS
     target_soc: int = DEFAULT_TARGET_SOC
     charge_power: int = DEFAULT_CHARGE_POWER
-    min_spread_ct: float = DEFAULT_MIN_SPREAD_CT
-    efficiency: int = DEFAULT_EFFICIENCY
     battery_capacity: float = DEFAULT_BATTERY_CAPACITY  # kWh
 
-    # Solar-forecast derived
-    solar_remaining_kwh: float | None = None
-    grid_charge_needed_kwh: float | None = None
+    # Optimizer plan
+    plan_action: str = NORMAL  # charge | hold | normal for the current slot
+    plan: list[dict[str, Any]] = field(default_factory=list)
+    plan_cost_eur: float | None = None  # expected grid bill over the horizon
+    plan_baseline_eur: float | None = None  # same horizon without the battery
+    next_charge_start: datetime | None = None
+    round_trip_efficiency: float | None = None  # %, measured (or fallback)
+    load_now_w: float | None = None  # load-profile value for this hour
+    load_profile: dict[str, list[float]] = field(default_factory=dict)
 
-    # Price-derived diagnostics (ct/kWh)
+    # Solar forecast (kWh)
+    solar_remaining_kwh: float | None = None
+    solar_tomorrow_kwh: float | None = None
+
+    # Price diagnostics over the next 24 h (ct/kWh)
     today_max_price: float | None = None
     today_min_price: float | None = None
-    spread_now_ct: float | None = None           # today_max - current
-    required_spread_ct: float | None = None      # max(min_spread_ct, break-even)
-    profitable_now: bool = False
+
+    # Battery ledger: what the stored energy cost (grid at its price, PV free)
+    ledger_eur: float = 0.0
+    cost_basis_ct: float | None = None
 
     # Cumulative energy counters (kWh) — for HA Energy Dashboard
     energy_charged_kwh: float = 0.0
@@ -199,14 +208,6 @@ class State:
     # Price timeline (attributes on sensor.current_price)
     prices_24h: list[dict[str, Any]] = field(default_factory=list)
 
-    # Block-mode
-    contiguous_block_mode: bool = False
-
-    # Smart-discharge
-    smart_discharge_enabled: bool = False
-    is_expensive_now: bool = False
-    next_expensive_start: datetime | None = None
-
 
 class Charge44Coordinator:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -233,11 +234,15 @@ class Charge44Coordinator:
         self._acmode_forced: str | None = None  # mode the self-heal is pushing
         self._acmode_reconciled: bool = False
         self._charge_suppressed: bool = False  # stop_charge until the reason ends
-        self._charge_hold: bool = False  # target hit, waiting out the hysteresis
         self._reserve_active: bool = False  # standby-drain top-up below SOC Min
         self._stall_watch_since: float | None = None
         self._charge_seen_ts: float | None = None  # last real charge into the battery
-        self._plan: PricePlan | None = None
+        self._load = LoadProfile()
+        self._plan_steps: list[Step] = []
+        self._plan_slot: datetime | None = None  # price slot the plan was made in
+        self._plan_soc: int | None = None
+        self._plan_horizon: datetime | None = None
+        self._planning: bool = False
         self._replan_requested: bool = False
         self._has_current_price: bool = False
         self._last_price_ok_ts: float = 0.0
@@ -295,7 +300,12 @@ class Charge44Coordinator:
                 )
             )
 
-        # Periodic cheap-charge evaluator
+        # Seed the weekday load profile from recorder statistics.
+        self.entry.async_create_background_task(
+            self.hass, self._async_seed_load_profile(), "charge44_seed_load_profile"
+        )
+
+        # Periodic evaluator: (re)plan when due, execute the current slot
         self._unsubs.append(
             async_track_time_interval(
                 self.hass, self._periodic_evaluate, CHEAP_EVAL_INTERVAL
@@ -378,14 +388,23 @@ class Charge44Coordinator:
             return
         self._maybe_reset_today_counters()
         price = self.state.current_price  # EUR/kWh
-        if self.state.pack_input is not None and self.state.pack_input > 0:
-            kwh = self.state.pack_input * dt_hours / 1000.0
+        pack_in = max(0.0, self.state.pack_input or 0.0)
+        if pack_in > 0:
+            kwh = pack_in * dt_hours / 1000.0
             self.state.energy_charged_kwh += kwh
-            if price is not None and self.state.cheap_mode_active:
-                # Only grid-charging during cheap mode costs money.
-                cost = kwh * price
+            # Only the grid share of a charge costs money; PV goes in at 0 €.
+            # The device reports grid input and battery charge 1:1, so the grid
+            # share is min(grid input, battery charge). Without a gridInputPower
+            # reading yet, fall back to "all of it while grid-charging".
+            grid_w = self.state.grid_input_power
+            if grid_w is None:
+                grid_w = pack_in if self.state.cheap_mode_active else 0.0
+            grid_kwh = min(pack_in, max(0.0, grid_w)) * dt_hours / 1000.0
+            if price is not None and grid_kwh > 0:
+                cost = grid_kwh * price
                 self.state.cost_charged_today_eur += cost
                 self.state.cost_charged_total_eur += cost
+                self.state.ledger_eur += cost
         if self.state.pack_output is not None and self.state.pack_output > 0:
             kwh = self.state.pack_output * dt_hours / 1000.0
             self.state.energy_discharged_kwh += kwh
@@ -393,12 +412,53 @@ class Charge44Coordinator:
                 value = kwh * price
                 self.state.value_discharged_today_eur += value
                 self.state.value_discharged_total_eur += value
+            self._ledger_take(kwh)
         if self.state.solar_input is not None and self.state.solar_input > 0:
             self.state.energy_solar_kwh += self.state.solar_input * dt_hours / 1000.0
         if self.state.output_home_power is not None and self.state.output_home_power > 0:
             self.state.energy_home_kwh += (
                 self.state.output_home_power * dt_hours / 1000.0
             )
+        self._update_cost_basis()
+        # Learn the house load: grid draw + Zendure output, minus what the
+        # Zendure itself pulls from the grid to charge.
+        if self.state.grid_power is not None and self.state.output_home_power is not None:
+            load = (
+                self.state.grid_power
+                + self.state.output_home_power
+                - max(0.0, self.state.grid_input_power or 0.0)
+            )
+            self._load.sample(dt_util.now(), max(0.0, load), dt_hours)
+
+    def _stored_kwh(self) -> float | None:
+        if self.state.soc is None:
+            return None
+        return max(0.0, self.state.soc / 100.0 * self.state.battery_capacity)
+
+    def _ledger_take(self, kwh: float) -> None:
+        """Energy leaves the battery at the ledger's average cost."""
+        stored = self._stored_kwh()
+        if stored is None or stored < 0.05 or self.state.ledger_eur <= 0:
+            return
+        self.state.ledger_eur = max(
+            0.0, self.state.ledger_eur - kwh * self.state.ledger_eur / stored
+        )
+
+    def _update_cost_basis(self) -> None:
+        """Average cost of the stored energy. Losses and standby drain shrink the
+        content but not the ledger, so they raise the price per kWh left; an
+        empty battery writes the rest off."""
+        stored = self._stored_kwh()
+        if stored is None:
+            return
+        if self.state.soc is not None and self.state.soc <= 0:
+            self.state.ledger_eur = 0.0
+        self.state.cost_basis_ct = (
+            round(self.state.ledger_eur / stored * 100.0, 2) if stored >= 0.05 else None
+        )
+
+    def restore_ledger(self, eur: float) -> None:
+        self.state.ledger_eur = max(0.0, eur)
 
     def restore_daily_counter(
         self, key: str, value: float, last_updated: datetime
@@ -518,6 +578,8 @@ class Charge44Coordinator:
                     self.state.solar_input = float(raw)
                 elif prop == "packInputPower":
                     self.state.pack_output = float(raw)
+                elif prop == "gridInputPower":
+                    self.state.grid_input_power = float(raw)
                 elif prop == "outputPackPower":
                     self.state.pack_input = float(raw)
                     if self.state.pack_input >= CHARGE_STALL_W:
@@ -592,11 +654,11 @@ class Charge44Coordinator:
             self._hold_zero()
             return
 
-        # Smart-discharge: when enabled, suspend the loop during the cheapest
-        # hours so the battery is preserved for normal/expensive hours. Cheap
-        # grid covers the home directly. Otherwise we always run the zero-
-        # export PI loop below — the battery covers the home, never exports.
-        if self.state.smart_discharge_enabled and self.state.is_cheap_now:
+        # Optimizer "hold": keep the stored energy for pricier slots later —
+        # the house runs on grid meanwhile, PV still charges the battery.
+        # Otherwise the zero-export loop below: the battery covers the home,
+        # never exports.
+        if self.state.optimizer_enabled and self.state.plan_action == HOLD:
             self._hold_zero()
             return
 
@@ -709,8 +771,10 @@ class Charge44Coordinator:
         setattr(self.state, key, value)
         if key == "min_soc":
             self._publish_min_soc(int(value))
+            self._replan_requested = True
         elif key == "target_soc":
             self._publish_soc_set(int(value))
+            self._replan_requested = True
         self._notify()
 
     def _publish_min_soc(self, value: int) -> None:
@@ -749,6 +813,7 @@ class Charge44Coordinator:
         if current:
             self.state.current_price = float(current.get("total", 0))
         self._detect_slot_minutes()
+        self._replan_requested = True
         self._evaluate()
 
     def _detect_slot_minutes(self) -> None:
@@ -766,7 +831,7 @@ class Charge44Coordinator:
         if diff > 0:
             self.state.slot_minutes = diff
 
-    # -------- Cheap-charge evaluator --------
+    # -------- Evaluator / optimizer --------
 
     @callback
     def _periodic_evaluate(self, _now) -> None:
@@ -791,8 +856,8 @@ class Charge44Coordinator:
             return
         if self.state.soc is not None and self.state.soc <= self.state.min_soc:
             return
-        if self.state.smart_discharge_enabled and self.state.is_cheap_now:
-            return  # explicit "preserve battery" beats fallback
+        if self.state.optimizer_enabled and self.state.plan_action == HOLD:
+            return  # the plan keeps the battery for later — beats the fallback
         target = int(self.state.fallback_discharge)
         stale = time.monotonic() - self._last_publish_ts >= HEARTBEAT_INTERVAL
         if self._last_published != target or stale:
@@ -800,57 +865,52 @@ class Charge44Coordinator:
             self._publish_limit(target)
 
     def _evaluate(self) -> None:
-        """Compute is_cheap_now / next_cheap_start, apply mode transitions."""
+        """Refresh price / forecast state, re-plan when due, execute the slot."""
         now = dt_util.now()
-        window = self._prices_next_24h(now)
+        window = self._price_slots(now)
 
         current_entry = self._price_for(now, window)
         self._has_current_price = current_entry is not None
         if current_entry is not None:
             self.state.current_price = float(current_entry["value"])
 
-        self._maybe_replan(window, current_entry)
-        is_cheap = self._compute_is_cheap(window, current_entry)
-        self.state.is_cheap_now = is_cheap
-        self.state.next_cheap_start = self._compute_next_cheap_start(window, now)
-
+        day = sorted(
+            (p for p in window if p["start"] < now + timedelta(hours=24)),
+            key=lambda p: p["start"],
+        )
+        values = [p["value"] for p in day]
+        self.state.today_max_price = round(max(values) * 100, 2) if values else None
+        self.state.today_min_price = round(min(values) * 100, 2) if values else None
         # Expose the price timeline as attributes-ready list.
         self.state.prices_24h = [
-            {
-                "start": p["start"].isoformat(),
-                "price_ct": round(p["value"] * 100, 2),
-            }
-            for p in sorted(window, key=lambda p: p["start"])
+            {"start": p["start"].isoformat(), "price_ct": round(p["value"] * 100, 2)}
+            for p in day
         ]
 
-        self._update_forecast_and_gap()
-        self._apply_mode(is_cheap)
+        self.state.solar_remaining_kwh = self._read_kwh(self._forecast_entity)
+        self.state.solar_tomorrow_kwh = self._read_kwh(self._forecast_tomorrow_entity)
+        self.state.round_trip_efficiency = round(self._efficiency() * 100, 1)
+        local = dt_util.as_local(now)
+        self.state.load_now_w = round(self._load.get(local.weekday(), local.hour))
+        self.state.load_profile = self._load.table()
+
+        if self._plan_due(now, window, current_entry):
+            self._request_plan(now, window, current_entry)
+        self._apply_plan(now)
+
+    def _apply_plan(self, now: datetime) -> None:
+        """Execute the plan's action for the current slot."""
+        self.state.plan_action = self._current_action(now)
+        self._apply_mode()
         self._reconcile_ac_mode()
         self._check_charge_stall()
         self._update_health()
         self._maybe_reset_today_counters()
         self._notify()
 
-    def _update_forecast_and_gap(self) -> None:
-        self.state.solar_remaining_kwh = self._read_forecast_kwh()
-        if self.state.soc is None:
-            self.state.grid_charge_needed_kwh = None
-            return
-        needed_kwh = max(
-            0.0,
-            (self.state.target_soc - self.state.soc) / 100.0
-            * self.state.battery_capacity,
-        )
-        if self.state.solar_remaining_kwh is None:
-            self.state.grid_charge_needed_kwh = round(needed_kwh, 3)
-        else:
-            gap = max(0.0, needed_kwh - self.state.solar_remaining_kwh)
-            self.state.grid_charge_needed_kwh = round(gap, 3)
-
-    def _prices_next_24h(self, now: datetime) -> list[dict[str, Any]]:
-        """Return upcoming price slots within 24 h of now. Slot length is
+    def _price_slots(self, now: datetime) -> list[dict[str, Any]]:
+        """All known price slots that haven't ended yet. Slot length is
         auto-detected (60 or 15 min depending on what Tibber delivered)."""
-        horizon = now + timedelta(hours=24)
         slot = timedelta(minutes=self.state.slot_minutes)
         result: list[dict[str, Any]] = []
         for p in list(self.state.today_prices) + list(self.state.tomorrow_prices):
@@ -861,10 +921,7 @@ class Charge44Coordinator:
                 dt = dt_util.parse_datetime(starts)
             except Exception:
                 continue
-            if dt is None:
-                continue
-            slot_end = dt + slot
-            if slot_end <= now or dt >= horizon:
+            if dt is None or dt + slot <= now:
                 continue
             result.append(
                 {
@@ -893,152 +950,252 @@ class Charge44Coordinator:
                 latest = dt
         return latest
 
-    def _maybe_replan(
-        self, window: list[dict[str, Any]], current: dict[str, Any] | None
-    ) -> None:
-        """Pick the cheap slots once per price snapshot.
+    def _efficiency(self) -> float:
+        """Round trip measured by the integration's own counters (energy out of
+        the battery / energy into it). The Zendure reports its conversions as
+        lossless, so every loss — charger, cells, inverter, standby — shows up
+        in this ratio. Fallback until enough energy has gone through."""
+        charged = self.state.energy_charged_kwh
+        if charged < EFFICIENCY_MIN_KWH:
+            return DEFAULT_EFFICIENCY / 100.0
+        return min(0.98, max(0.5, self.state.energy_discharged_kwh / charged))
 
-        Re-picking every minute on the shrinking remainder of the window lets a
-        started block jump elsewhere mid-charge and stretches the scattered
-        mode past N hours. So: re-plan only when new day-ahead prices arrived
-        (or a selection setting changed) — and never inside a planned slot.
-        """
-        if not window:
+    def _plan_due(
+        self,
+        now: datetime,
+        window: list[dict[str, Any]],
+        current: dict[str, Any] | None,
+    ) -> bool:
+        if not self.state.optimizer_enabled or not window or self._planning:
+            return False
+        if self.state.soc is None:
+            return False
+        if self._replan_requested or not self._plan_steps:
+            return True
+        if self._known_horizon() != self._plan_horizon:
+            return True  # new day-ahead prices
+        if current is not None and current["start"] != self._plan_slot:
+            return True  # every slot: re-plan from the measured SOC
+        if (
+            self._plan_soc is not None
+            and abs(self.state.soc - self._plan_soc) >= REPLAN_SOC_DELTA
+        ):
+            return True
+        return False
+
+    def _request_plan(
+        self,
+        now: datetime,
+        window: list[dict[str, Any]],
+        current: dict[str, Any] | None,
+    ) -> None:
+        inputs = self._build_plan_inputs(now, window)
+        if inputs is None:
             return
-        horizon = self._known_horizon()
-        plan = self._plan
-        if plan is not None:
-            if current is not None and current["start"] in plan.cheap_starts:
-                return
-            if not self._replan_requested and (
-                horizon is None or horizon <= plan.horizon
-            ):
-                return
-        self._plan = self._build_plan(window, horizon)
+        self._planning = True
+        self._replan_requested = False
+        self.hass.async_create_task(
+            self._async_replan(inputs, current["start"] if current else None)
+        )
+
+    async def _async_replan(
+        self, inputs: tuple[list[Slot], Battery, float, bool], slot_start: datetime | None
+    ) -> None:
+        slots, battery, energy, charging = inputs
+        try:
+            steps = await self.hass.async_add_executor_job(
+                optimise, slots, battery, energy, OPTIMIZER_STEP_WH, charging
+            )
+        except Exception as err:  # never let a planning bug stop the regulation
+            _LOGGER.warning("charge44: optimizer failed: %s", err)
+            steps = []
+        finally:
+            self._planning = False
+        self._store_plan(steps, slots, battery, slot_start)
+        self._apply_plan(dt_util.now())
+
+    def plan_now(self) -> None:
+        """Synchronous re-plan (tests, diagnostics)."""
+        now = dt_util.now()
+        window = self._price_slots(now)
+        current = self._price_for(now, window)
+        inputs = self._build_plan_inputs(now, window)
+        if inputs is None:
+            return
+        slots, battery, energy, charging = inputs
+        self._store_plan(
+            optimise(slots, battery, energy, OPTIMIZER_STEP_WH, charging),
+            slots,
+            battery,
+            current["start"] if current else None,
+        )
         self._replan_requested = False
 
-    def _build_plan(
-        self, window: list[dict[str, Any]], horizon: datetime | None
-    ) -> PricePlan:
-        # cheap_hours is expressed in equivalent HOURS — translate to slot count.
-        slots_per_hour = max(1.0, 60.0 / max(1, self.state.slot_minutes))
-        n = max(1, min(int(self.state.cheap_hours * slots_per_hour), len(window)))
-        if self.state.contiguous_block_mode:
-            chosen = self._cheapest_contiguous_block(window, n)
-        else:
-            chosen = sorted(window, key=lambda p: p["value"])[:n]
-        return PricePlan(
-            cheap_starts=frozenset(p["start"] for p in chosen),
-            horizon=horizon or max(p["start"] for p in window),
-        )
-
-    def _required_spread(self, price: float) -> float:
-        """EUR/kWh a charge at `price` must undercut the reference by:
-        max(user min-spread, round-trip break-even)."""
-        eff = max(0.5, min(1.0, self.state.efficiency / 100.0))
-        return max(self.state.min_spread_ct / 100.0, price * (1.0 / eff - 1.0))
-
-    def _compute_is_cheap(
-        self, window: list[dict[str, Any]], current: dict[str, Any] | None
-    ) -> bool:
-        if not window or current is None:
-            self.state.today_max_price = None
-            self.state.today_min_price = None
-            self.state.spread_now_ct = None
-            self.state.required_spread_ct = None
-            self.state.profitable_now = False
-            return False
-
-        values = [p["value"] for p in window]
-        day_max = max(values)
-        day_min = min(values)
-        current_val = current["value"]
-
-        required = self._required_spread(current_val)
-        spread_now = day_max - current_val
-
-        self.state.today_max_price = round(day_max * 100, 2)
-        self.state.today_min_price = round(day_min * 100, 2)
-        self.state.spread_now_ct = round(spread_now * 100, 2)
-        self.state.required_spread_ct = round(required * 100, 2)
-        self.state.profitable_now = spread_now >= required
-
-        plan = self._plan or self._build_plan(window, None)
-        in_cheap = current["start"] in plan.cheap_starts
-
-        # Smart-discharge gating: symmetric spread criterion.
-        # Discharge is worth it whenever the current price sits high enough
-        # above today's minimum to recover the round-trip loss.
-        spread_from_min_now = current_val - day_min
-        self.state.is_expensive_now = spread_from_min_now >= required
-        upcoming_profitable = sorted(
-            (
-                p
-                for p in window
-                if p["start"] > dt_util.now() and (p["value"] - day_min) >= required
-            ),
-            key=lambda p: p["start"],
-        )
-        self.state.next_expensive_start = (
-            upcoming_profitable[0]["start"] if upcoming_profitable else None
-        )
-
-        return in_cheap and self.state.profitable_now
-
-    @staticmethod
-    def _cheapest_contiguous_block(
-        window: list[dict[str, Any]], size: int
-    ) -> list[dict[str, Any]]:
-        """Return the N contiguous entries (by startsAt order) with the
-        smallest sum of prices."""
-        if len(window) < size or size <= 0:
-            return []
-        ordered = sorted(window, key=lambda p: p["start"])
-        best_start = 0
-        running = sum(p["value"] for p in ordered[:size])
-        best_sum = running
-        for i in range(1, len(ordered) - size + 1):
-            running = running - ordered[i - 1]["value"] + ordered[i + size - 1]["value"]
-            if running < best_sum:
-                best_sum = running
-                best_start = i
-        return ordered[best_start : best_start + size]
-
-    def _compute_next_cheap_start(
-        self, window: list[dict[str, Any]], now: datetime
-    ) -> datetime | None:
-        """Next slot that would actually charge: in the plan (block or
-        scattered, same as the live decision) and profitable."""
-        if not window:
+    def _build_plan_inputs(
+        self, now: datetime, window: list[dict[str, Any]]
+    ) -> tuple[list[Slot], Battery, float, bool] | None:
+        if self.state.soc is None or not window:
             return None
-        plan = self._plan or self._build_plan(window, None)
-        day_max = max(p["value"] for p in window)
-        upcoming = sorted(
-            (p for p in window if p["start"] > now and p["start"] in plan.cheap_starts),
-            key=lambda p: p["start"],
+        cap_wh = self.state.battery_capacity * 1000.0
+        ordered = sorted(window, key=lambda p: p["start"])
+        bounds = slot_bounds(
+            [p["start"] for p in ordered], self.state.slot_minutes, now
         )
-        for p in upcoming:
-            if day_max - p["value"] >= self._required_spread(p["value"]):
-                return p["start"]
-        return None
+        pv = distribute_pv(bounds, self._pv_days(now))
+        slots: list[Slot] = []
+        for p, (a, b), pv_wh in zip(ordered, bounds, pv):
+            hours = (b - a).total_seconds() / 3600.0
+            if hours <= 0:
+                continue
+            local = dt_util.as_local(a)
+            load_w = self._load.get(local.weekday(), local.hour)
+            slots.append(Slot(p["start"], hours, p["value"], load_w * hours, pv_wh))
+        battery = Battery(
+            capacity_wh=cap_wh,
+            min_wh=cap_wh * self.state.min_soc / 100.0,
+            max_wh=cap_wh * self.state.target_soc / 100.0,
+            charge_w=float(self.state.charge_power),
+            output_w=float(self.state.max_output),
+            efficiency=self._efficiency(),
+        )
+        # Whether the device is grid-charging right now: stopping costs a mode
+        # switch, so the plan won't cut a running charge for a fraction of a cent.
+        return slots, battery, cap_wh * self.state.soc / 100.0, self.state.cheap_mode_active
+
+    def _store_plan(
+        self,
+        steps: list[Step],
+        slots: list[Slot],
+        battery: Battery,
+        slot_start: datetime | None,
+    ) -> None:
+        self._plan_steps = steps
+        self._plan_slot = slot_start
+        self._plan_soc = self.state.soc
+        self._plan_horizon = self._known_horizon()
+        cap = battery.capacity_wh or 1.0
+        self.state.plan = [
+            {
+                "start": s.start.isoformat(),
+                "action": s.action,
+                "soc": round(s.energy_wh / cap * 100),
+                "price_ct": round(s.price * 100, 2),
+            }
+            for s in steps
+        ]
+        self.state.plan_cost_eur = (
+            round(sum(s.grid_wh * s.price for s in steps) / 1000.0, 3) if steps else None
+        )
+        self.state.plan_baseline_eur = (
+            round(baseline_cost(slots, battery.output_w), 3) if steps else None
+        )
+        self.state.next_charge_start = next(
+            (s.start for s in steps if s.action == CHARGE), None
+        )
+
+    def _current_action(self, now: datetime) -> str:
+        if not self.state.optimizer_enabled:
+            return NORMAL
+        length = timedelta(minutes=self.state.slot_minutes)
+        for step in self._plan_steps:
+            if step.start <= now < step.start + length:
+                return step.action
+        return NORMAL
+
+    def _pv_days(self, now: datetime) -> list[tuple[datetime, datetime, datetime, float]]:
+        """(from, sunrise, sunset, kWh) for remaining-today and tomorrow."""
+        days = []
+        today = dt_util.as_local(now).date()
+        remaining = self._read_kwh(self._forecast_entity)
+        sun = self._sun_window(today)
+        if remaining and sun:
+            days.append((now, sun[0], sun[1], remaining))
+        tomorrow = self._read_kwh(self._forecast_tomorrow_entity)
+        sun = self._sun_window(today + timedelta(days=1))
+        if tomorrow and sun:
+            days.append((sun[0], sun[0], sun[1], tomorrow))
+        return days
+
+    def _sun_window(self, day) -> tuple[datetime, datetime] | None:
+        try:
+            from homeassistant.helpers.sun import get_astral_event_date
+
+            rise = get_astral_event_date(self.hass, "sunrise", day)
+            set_ = get_astral_event_date(self.hass, "sunset", day)
+        except Exception:  # no location / helper unavailable
+            return None
+        if rise is None or set_ is None or set_ <= rise:
+            return None
+        return rise, set_
+
+    async def _async_seed_load_profile(self) -> None:
+        """Fill the weekday profile from the last weeks of hourly statistics:
+        load = Shelly grid power + Zendure output − Zendure grid input."""
+        try:
+            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.statistics import (
+                statistics_during_period,
+            )
+            from homeassistant.helpers import entity_registry as er
+        except ImportError:
+            return
+        reg = er.async_get(self.hass)
+        entry_id = self.entry.entry_id
+        grid = reg.async_get_entity_id("sensor", DOMAIN, f"{entry_id}_grid_power")
+        out = reg.async_get_entity_id(
+            "sensor", DOMAIN, f"{entry_id}_output_home_power"
+        )
+        grid_in = reg.async_get_entity_id(
+            "sensor", "mqtt", f"zendure_{self.zendure_sn}_grid_input_power"
+        )
+        if not grid or not out:
+            return
+        end = dt_util.utcnow()
+        start = end - timedelta(days=LOAD_SEED_DAYS)
+        ids = {e for e in (grid, out, grid_in) if e}
+        try:
+            stats = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                start,
+                end,
+                ids,
+                "hour",
+                None,
+                {"mean"},
+            )
+        except Exception as err:
+            _LOGGER.debug("charge44: load-profile seed failed: %s", err)
+            return
+        hours: dict[float, dict[str, float]] = {}
+        for eid, rows in stats.items():
+            for row in rows:
+                ts, mean = row.get("start"), row.get("mean")
+                if ts is None or mean is None:
+                    continue
+                if isinstance(ts, datetime):
+                    ts = ts.timestamp()
+                hours.setdefault(float(ts), {})[eid] = float(mean)
+        seeded = 0
+        for ts in sorted(hours):
+            h = hours[ts]
+            if grid not in h or out not in h:
+                continue
+            load = max(0.0, h[grid] + h[out] - max(0.0, h.get(grid_in, 0.0)))
+            local = dt_util.as_local(dt_util.utc_from_timestamp(ts))
+            self._load.add_hour(local.weekday(), local.hour, load)
+            seeded += 1
+        _LOGGER.info("charge44: load profile seeded from %d hours of statistics", seeded)
+        self._replan_requested = True
 
     # -------- Mode transitions --------
 
-    def _apply_mode(self, is_cheap: bool) -> None:
+    def _apply_mode(self) -> None:
         soc = self.state.soc
         target = self.state.target_soc
         # Auto-cancel one-shot manual charge as soon as the target SOC is hit.
         if self.state.manual_charge and soc is not None and soc >= target:
             self.state.manual_charge = False
-        # Once the target is hit, auto-charge waits until SOC has dropped
-        # CHARGE_RESUME_HYSTERESIS below it. Without the band the regulation's
-        # discharge and the re-entry ping-pong across the target every few
-        # minutes for the rest of the cheap window.
-        if soc is not None:
-            if soc >= target:
-                self._charge_hold = True
-            elif soc <= target - CHARGE_RESUME_HYSTERESIS:
-                self._charge_hold = False
         # Standby protection: below SOC Min the regulation parks the output,
         # but the hub's own ~10 W keeps draining the battery. On 2026-10-08/09
         # that took it from 5 % to 0 % overnight, and the firmware's deep-
@@ -1056,12 +1213,12 @@ class Charge44Coordinator:
                 self._reserve_active = True
             elif soc >= self.state.min_soc + RESERVE_TARGET_ABOVE:
                 self._reserve_active = False
-        want_charge = self._want_cheap_charge(is_cheap)
+        want_charge = self._want_grid_charge()
         # stop_charge: stay off until the reason that would charge has ended.
         # The reserve top-up is a protection and is not suppressed — otherwise
         # a stop near empty would leave the battery draining indefinitely.
         if self._charge_suppressed and not self._reserve_active:
-            if self._charge_reason(is_cheap):
+            if self._charge_reason():
                 want_charge = False
             else:
                 self._charge_suppressed = False
@@ -1070,16 +1227,10 @@ class Charge44Coordinator:
         elif not want_charge and self.state.cheap_mode_active:
             self._exit_cheap_mode()
 
-    def _charge_reason(self, is_cheap: bool) -> bool:
+    def _charge_reason(self) -> bool:
         """Whether anything currently asks for grid charging (guards aside)."""
-        return (
-            self.state.manual_charge
-            or (
-                self.state.charge_when_free
-                and self.state.current_price is not None
-                and self.state.current_price <= 0.0
-            )
-            or (self.state.cheap_charge_enabled and is_cheap)
+        return self.state.manual_charge or (
+            self.state.optimizer_enabled and self.state.plan_action == CHARGE
         )
 
     def _active_reason(self) -> str:
@@ -1088,38 +1239,16 @@ class Charge44Coordinator:
             return "manual"
         if self._reserve_active:
             return "reserve"
-        if (
-            self.state.charge_when_free
-            and self.state.current_price is not None
-            and self.state.current_price <= 0.0
-        ):
-            return "free"
-        return "cheap"
+        return "optimizer"
 
-    def _want_cheap_charge(self, is_cheap: bool) -> bool:
+    def _want_grid_charge(self) -> bool:
         if self.state.temperature_guard in ("too_cold", "too_hot"):
             return False
         if self.state.soc is None or self.state.soc >= self.state.target_soc:
             return False
         if self.state.manual_charge or self._reserve_active:
             return True
-        if self._charge_hold:
-            return False
-        if (
-            self.state.charge_when_free
-            and self.state.current_price is not None
-            and self.state.current_price <= 0.0
-        ):
-            return True
-        if not self.state.cheap_charge_enabled:
-            return False
-        if not is_cheap:
-            return False
-        gap = self.state.grid_charge_needed_kwh
-        if gap is None:
-            # No forecast info — fall back to always-charge-when-cheap.
-            return True
-        return gap > 0
+        return self.state.optimizer_enabled and self.state.plan_action == CHARGE
 
     def _reconcile_ac_mode(self) -> None:
         """Once after start: Input mode that this instance doesn't want is a
@@ -1185,24 +1314,6 @@ class Charge44Coordinator:
             )
         self.state.charge_stalled = stalled
 
-    def _read_forecast_kwh(self) -> float | None:
-        """Solar kWh still to come before the battery is needed.
-
-        "Remaining today" until today's PV is done; in the evening the next
-        PV is tomorrow's, so a cheap slot before midnight checks the tomorrow
-        forecast instead of seeing ~0 and charging from grid needlessly."""
-        today = self._read_kwh(self._forecast_entity)
-        if (
-            today is not None
-            and today < FORECAST_TODAY_DONE_KWH
-            and self._forecast_tomorrow_entity
-            and dt_util.now().hour >= 12  # not a dark morning: the evening
-        ):
-            tomorrow = self._read_kwh(self._forecast_tomorrow_entity)
-            if tomorrow is not None:
-                return tomorrow
-        return today
-
     def _read_kwh(self, entity_id: str | None) -> float | None:
         if not entity_id:
             return None
@@ -1218,9 +1329,9 @@ class Charge44Coordinator:
             value = value / 1000.0
         return value
 
-    def _enter_cheap_mode(self, reason: str = "cheap") -> None:
+    def _enter_cheap_mode(self, reason: str = "optimizer") -> None:
         _LOGGER.info(
-            "charge44: entering cheap-charge (%s, price=%.3f EUR/kWh, SOC=%s%%)",
+            "charge44: entering grid charge (%s, price=%.3f EUR/kWh, SOC=%s%%)",
             reason,
             self.state.current_price or 0.0,
             self.state.soc,
@@ -1246,7 +1357,7 @@ class Charge44Coordinator:
         )
 
     def _exit_cheap_mode(self) -> None:
-        _LOGGER.info("charge44: leaving cheap-charge")
+        _LOGGER.info("charge44: leaving grid charge")
         self.state.cheap_mode_active = False
         self.state.charge_reason = None
         self._publish_input_limit(0)
@@ -1280,16 +1391,16 @@ class Charge44Coordinator:
 
     # -------- Switch hooks --------
 
-    def set_cheap_enabled(self, enabled: bool) -> None:
-        if self.state.cheap_charge_enabled == enabled:
+    def set_optimizer_enabled(self, enabled: bool) -> None:
+        if self.state.optimizer_enabled == enabled:
             return
-        self.state.cheap_charge_enabled = enabled
-        self._evaluate()
-
-    def set_charge_when_free(self, enabled: bool) -> None:
-        if self.state.charge_when_free == enabled:
-            return
-        self.state.charge_when_free = enabled
+        self.state.optimizer_enabled = enabled
+        if not enabled:
+            self._plan_steps = []
+            self.state.plan = []
+            self.state.next_charge_start = None
+            self.state.plan_cost_eur = self.state.plan_baseline_eur = None
+        self._replan_requested = True
         self._evaluate()
 
     def set_manual_charge(self, enabled: bool) -> None:
@@ -1300,19 +1411,6 @@ class Charge44Coordinator:
         self.state.manual_charge = enabled
         self._evaluate()
 
-    def set_contiguous_block(self, enabled: bool) -> None:
-        if self.state.contiguous_block_mode == enabled:
-            return
-        self.state.contiguous_block_mode = enabled
-        self._replan_requested = True
-        self._evaluate()
-
-    def set_smart_discharge(self, enabled: bool) -> None:
-        if self.state.smart_discharge_enabled == enabled:
-            return
-        self.state.smart_discharge_enabled = enabled
-        self._notify()
-
     # -------- Services --------
 
     async def service_force_charge(self) -> None:
@@ -1322,7 +1420,7 @@ class Charge44Coordinator:
 
     async def service_stop_charge(self) -> None:
         """Stop grid charging and keep it off until the current reason ends
-        (cheap window over, price back above zero)."""
+        (the optimizer's planned charge slots are over)."""
         _LOGGER.info("charge44: stop_charge invoked")
         self.state.manual_charge = False
         self._charge_suppressed = True
