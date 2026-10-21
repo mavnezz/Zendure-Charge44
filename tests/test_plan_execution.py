@@ -253,3 +253,29 @@ def test_house_load_learned_without_device_grid_charge(opt):
     opt.state.grid_input_power = 800.0
     _tick_energy(opt, seconds=5)
     assert seen == [pytest.approx(300.0)]
+
+
+# --- standby meter wiring -------------------------------------------------------
+
+def test_standby_meter_only_fed_when_idle(opt):
+    seen = []
+    opt._standby.update = lambda ts, soc, idle, cap: seen.append(idle)
+    opt.state.pack_input = opt.state.pack_output = 0.0
+    opt.state.solar_input = 0.0
+    opt.state.grid_input_power = 0.0
+    opt._track_standby()
+    opt.state.pack_output = 120.0  # discharging → not idle
+    opt._track_standby()
+    opt.state.pack_output = 0.0
+    opt.state.cheap_mode_active = True  # grid-charging → not idle
+    opt._track_standby()
+    opt.state.cheap_mode_active = False
+    opt.state.pack_input = None  # unknown → not idle
+    opt._track_standby()
+    assert seen == [True, False, False, False]
+
+
+def test_standby_restore(opt):
+    opt.restore_standby(23.4, 3)
+    assert opt.state.standby_w == 23.4
+    assert opt.state.standby_windows == 3

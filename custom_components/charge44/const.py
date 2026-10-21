@@ -60,6 +60,7 @@ DEFAULT_EFFICIENCY = 85                   # % round trip until the counters have
 EFFICIENCY_MIN_KWH = 50.0                 # kWh charged before the measured round trip is trusted
 OPTIMIZER_STEP_WH = 20.0                  # Wh, stored-energy resolution of the optimizer
 REPLAN_SOC_DELTA = 3                      # %, SOC drift from the plan's assumption that triggers a re-plan
+STANDBY_IDLE_W = 5.0                      # W, below this every flow counts as idle for the standby meter
 LOAD_SEED_DAYS = 28                       # days of recorder statistics that seed the weekday load profile
 RESERVE_TRIGGER_BELOW = 3                 # %, SOC this far below SOC Min → grid top-up regardless of price
 RESERVE_TARGET_ABOVE = 3                  # %, ...until SOC is this far above SOC Min

@@ -322,6 +322,7 @@ async def async_setup_entry(
         for key, name, state_key, daily in COST_SENSORS
     )
     entities.append(Charge44CostBasisSensor(coordinator))
+    entities.append(Charge44StandbySensor(coordinator))
     async_add_entities(entities)
 
 
@@ -466,3 +467,43 @@ class Charge44CostBasisSensor(Charge44Entity, RestoreSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"ledger_eur": round(self.coordinator.state.ledger_eur, 4)}
+
+
+class Charge44StandbySensor(Charge44Entity, RestoreSensor):
+    """Hub's own draw from the battery, measured from the SOC decline while
+    nothing flows. Persisted with the number of measurement windows."""
+
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_suggested_display_precision = 1
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: Charge44Coordinator) -> None:
+        super().__init__(coordinator, "standby_consumption", "Standby consumption")
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_sensor_data()
+        last_state = await self.async_get_last_state()
+        if last is None or last.native_value is None or last_state is None:
+            return
+        try:
+            self.coordinator.restore_standby(
+                float(last.native_value), int(last_state.attributes.get("windows", 1))
+            )
+        except (TypeError, ValueError):
+            pass
+
+    @property
+    def native_value(self) -> Any:
+        return self.coordinator.state.standby_w
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        s = self.coordinator.state
+        return {
+            "windows": s.standby_windows,
+            "last_window_w": s.standby_last_w,
+            "last_window_hours": s.standby_last_hours,
+        }
