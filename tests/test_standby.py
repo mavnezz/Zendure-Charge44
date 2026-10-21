@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from charge44.standby import StandbyMeter
+from charge44.standby import StandbyMeter, fit_losses
 
 CAP = 3840.0
 H = 3600.0
@@ -68,3 +68,23 @@ def test_averages_over_windows():
     assert m.windows == 2
     assert m.value_w == pytest.approx((20.0 + 19.2) / 2, abs=0.2)
     assert m.last_w == pytest.approx(19.2, abs=0.1)
+
+
+def test_fit_losses_takes_standby_out():
+    """Sep 1 – Oct 20: 153.1 kWh in, 126.7 out, 1180 h, stored 0.69 kWh less."""
+    eff, standby = fit_losses(153.1, 126.7, 1180, 10.0, -0.69, 0.95)
+    assert eff == pytest.approx(0.9, abs=0.005) and standby == 10.0
+    eff, _ = fit_losses(153.1, 126.7, 1180, 0.0, -0.69, 0.95)
+    assert eff == pytest.approx(0.823, abs=0.002)
+
+
+def test_fit_losses_caps_and_fits_standby_to_the_balance():
+    """Last 28 days: 84.39 in, 72.49 out, 2.54 kWh less stored, 670 h → 14.44 kWh
+    lost; a 25 W meter value can't fit, so 95 % and ~15 W."""
+    eff, standby = fit_losses(84.39, 72.49, 670, 25.0, -2.54, 0.95)
+    assert eff == 0.95
+    assert standby == pytest.approx(15.25, abs=0.05)
+
+
+def test_fit_losses_needs_data():
+    assert fit_losses(0.0, 0.0, 100, 27.0, 0.0, 0.95) is None

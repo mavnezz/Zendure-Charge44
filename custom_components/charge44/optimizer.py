@@ -33,6 +33,11 @@ _TIE_EUR = 1e-5  # a different action must beat NORMAL by more than this
 # the plan, so near-equal 15-min prices give one charge block instead of a
 # string of short ones (2026-10-20 dry run: 3 fragments within 0.5 ct).
 SWITCH_EUR = 0.005
+# Below this many Wh under SOC Min the plan pays a prohibitive price: the hub's
+# own draw keeps sinking a parked battery, and the plan must top it up (at the
+# cheapest moment) or keep a buffer before it gets there — not leave it to the
+# price-blind reserve top-up that kicks in one step further down.
+_FLOOR_PENALTY_EUR_PER_WH = 0.01
 
 
 @dataclass(frozen=True)
@@ -51,7 +56,9 @@ class Battery:
     max_wh: float  # SOC Max — nothing charges above
     charge_w: float  # grid-charge power (inputLimit)
     output_w: float  # inverter AC ceiling
-    efficiency: float  # round trip, split evenly between in and out
+    efficiency: float  # conversion round trip, split evenly between in and out
+    standby_w: float = 0.0  # hub's own draw from the battery, in every slot
+    floor_wh: float | None = None  # stored energy the plan must not drift below
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,14 @@ def _simulate(
     action: str, energy: float, slot: Slot, bat: Battery, eta_in: float, eta_out: float
 ) -> tuple[float, float]:
     """(stored energy after the slot, grid import in Wh)."""
+    e2, grid = _flows(action, energy, slot, bat, eta_in, eta_out)
+    # The hub's own draw comes out of the battery whatever the action.
+    return max(0.0, e2 - bat.standby_w * slot.hours), grid
+
+
+def _flows(
+    action: str, energy: float, slot: Slot, bat: Battery, eta_in: float, eta_out: float
+) -> tuple[float, float]:
     room = max(0.0, bat.max_wh - energy)
     load, pv = slot.load_wh, slot.pv_wh
     if action == CHARGE:
@@ -115,6 +130,8 @@ def _best(
         e2, grid = _simulate(action, energy, slot, bat, eta_in, eta_out)
         now_charging = action == CHARGE
         cost = grid * slot.price / 1000.0 + _interp(nxt[now_charging], e2, step_wh)
+        if bat.floor_wh is not None and e2 < bat.floor_wh:
+            cost += (bat.floor_wh - e2) * _FLOOR_PENALTY_EUR_PER_WH
         if now_charging != charging:
             cost += switch_eur
         if best is None or cost < best[0] - _TIE_EUR:

@@ -143,6 +143,32 @@ def test_running_charge_not_cut_for_a_fraction_of_a_cent():
     assert optimise(_slots(prices), bat, 384.0, charging=True)[0].action == CHARGE
 
 
+# --- standby drain ------------------------------------------------------------
+
+def test_standby_drain_shows_in_the_plan():
+    steps = optimise(_slots([0.30] * 4, load_w=0.0), _bat(standby_w=30.0), 2000.0)
+    assert [round(s.energy_wh) for s in steps] == [2000, 1970, 1940, 1910]
+
+
+def test_standby_top_up_at_cheapest_slot_before_the_floor():
+    """Parked at SOC Min, 30 W drain, floor 2 % lower: it must top up before
+    the end of slot 2 — and picks the cheapest slot that is still in time."""
+    bat = _bat(standby_w=30.0, floor_wh=384.0 - 77.0)
+    steps = optimise(_slots([0.40, 0.40, 0.30, 0.20, 0.35, 0.35], load_w=0.0), bat, 384.0)
+    assert _actions(steps).index(CHARGE) == 2
+
+
+def test_standby_buffer_kept_instead_of_buying_dear():
+    """Battery a little above SOC Min, evening at 40 ct, the next cheap slot far
+    off: hold back enough to ride out the drain rather than spend it now and
+    top up at the night price."""
+    bat = _bat(standby_w=30.0, floor_wh=384.0 - 77.0)
+    prices = [0.40] * 2 + [0.38] * 8 + [0.20]
+    steps = optimise(_slots(prices, load_w=150.0), bat, 384.0 + 300.0)
+    assert CHARGE not in _actions(steps)[:10]
+    assert min(s.energy_wh for s in steps) >= 384.0 - 77.0 - 1e-6
+
+
 # --- PV distribution ---------------------------------------------------------
 
 RISE = T0.replace(hour=7)

@@ -33,6 +33,7 @@ from .const import (
     DEFAULT_CHARGE_POWER,
     DEFAULT_DEADZONE,
     DEFAULT_EFFICIENCY,
+    DEFAULT_STANDBY_W,
     DEFAULT_FALLBACK_DISCHARGE,
     DEFAULT_GRID_BIAS,
     DEFAULT_KP,
@@ -44,7 +45,8 @@ from .const import (
     DRIFT_TOLERANCE_W,
     DRIFT_WARN_THRESHOLD,
     DOMAIN,
-    EFFICIENCY_MIN_KWH,
+    EFFICIENCY_CEILING,
+    EFFICIENCY_WINDOW_DAYS,
     EVENT_CHEAP_CHARGE_ENDED,
     EVENT_CHEAP_CHARGE_STARTED,
     EVENT_CHARGE_STALLED,
@@ -58,6 +60,7 @@ from .const import (
     RESERVE_TARGET_ABOVE,
     RESERVE_TRIGGER_BELOW,
     SAFETY_TICK_INTERVAL,
+    STANDBY_FLOOR_BELOW_MIN,
     STANDBY_IDLE_W,
     SIGNAL_UPDATE,
     STALE_GRID_AFTER,
@@ -75,7 +78,7 @@ from .const import (
 )
 from .discovery import clear_legacy_discovery, pack_info, publish_zendure_discovery
 from .load_profile import LoadProfile
-from .standby import StandbyMeter
+from .standby import StandbyMeter, fit_losses
 from .optimizer import (
     CHARGE,
     HOLD,
@@ -163,7 +166,10 @@ class State:
     plan_cost_eur: float | None = None  # expected grid bill over the horizon
     plan_baseline_eur: float | None = None  # same horizon without the battery
     next_charge_start: datetime | None = None
-    round_trip_efficiency: float | None = None  # %, measured (or fallback)
+    round_trip_efficiency: float | None = None  # %, conversion round trip the plan uses
+    efficiency_source: str = "default"  # measured | default
+    efficiency_lifetime: float | None = None  # %, energy out / in incl. standby
+    standby_used_w: float | None = None  # W, standby the plan assumes
     load_now_w: float | None = None  # load-profile value for this hour
     load_profile: dict[str, list[float]] = field(default_factory=dict)
 
@@ -247,6 +253,8 @@ class Charge44Coordinator:
         self._charge_seen_ts: float | None = None  # last real charge into the battery
         self._load = LoadProfile()
         self._standby = StandbyMeter()
+        self._eff_conv: float | None = None
+        self._standby_fit: float | None = None  # standby consistent with the balance
         self._plan_steps: list[Step] = []
         self._plan_slot: datetime | None = None  # price slot the plan was made in
         self._plan_soc: int | None = None
@@ -309,9 +317,18 @@ class Charge44Coordinator:
                 )
             )
 
-        # Seed the weekday load profile from recorder statistics.
+        # Seed the weekday load profile and measure the conversion round trip
+        # from recorder statistics; re-measure the round trip daily.
         self.entry.async_create_background_task(
             self.hass, self._async_seed_load_profile(), "charge44_seed_load_profile"
+        )
+        self.entry.async_create_background_task(
+            self.hass, self._async_update_efficiency(), "charge44_measure_efficiency"
+        )
+        self._unsubs.append(
+            async_track_time_interval(
+                self.hass, self._periodic_efficiency, timedelta(hours=24)
+            )
         )
 
         # Periodic evaluator: (re)plan when due, execute the current slot
@@ -470,31 +487,36 @@ class Charge44Coordinator:
         self.state.standby_w = round(value_w, 1)
         self.state.standby_windows = self._standby.windows
 
-    def _stored_kwh(self) -> float | None:
+    def _usable_kwh(self) -> float | None:
+        """Energy above SOC Min — what the house can still get."""
         if self.state.soc is None:
             return None
-        return max(0.0, self.state.soc / 100.0 * self.state.battery_capacity)
+        return max(
+            0.0,
+            (self.state.soc - self.state.min_soc) / 100.0 * self.state.battery_capacity,
+        )
 
     def _ledger_take(self, kwh: float) -> None:
         """Energy leaves the battery at the ledger's average cost."""
-        stored = self._stored_kwh()
-        if stored is None or stored < 0.05 or self.state.ledger_eur <= 0:
+        usable = self._usable_kwh()
+        if usable is None or usable < 0.05 or self.state.ledger_eur <= 0:
             return
         self.state.ledger_eur = max(
-            0.0, self.state.ledger_eur - kwh * self.state.ledger_eur / stored
+            0.0, self.state.ledger_eur - kwh * self.state.ledger_eur / usable
         )
 
     def _update_cost_basis(self) -> None:
-        """Average cost of the stored energy. Losses and standby drain shrink the
-        content but not the ledger, so they raise the price per kWh left; an
-        empty battery writes the rest off."""
-        stored = self._stored_kwh()
-        if stored is None:
+        """Average cost of the usable energy (above SOC Min). Losses and standby
+        drain shrink it but not the ledger, so they raise the price per kWh
+        left; reaching SOC Min writes the rest off. (Writing off only at 0 %
+        let the costs pile up, since the battery no longer gets there.)"""
+        usable = self._usable_kwh()
+        if usable is None:
             return
-        if self.state.soc is not None and self.state.soc <= 0:
+        if self.state.soc is not None and self.state.soc <= self.state.min_soc:
             self.state.ledger_eur = 0.0
         self.state.cost_basis_ct = (
-            round(self.state.ledger_eur / stored * 100.0, 2) if stored >= 0.05 else None
+            round(self.state.ledger_eur / usable * 100.0, 2) if usable >= 0.05 else None
         )
 
     def restore_ledger(self, eur: float) -> None:
@@ -930,6 +952,12 @@ class Charge44Coordinator:
         self.state.solar_remaining_kwh = self._read_kwh(self._forecast_entity)
         self.state.solar_tomorrow_kwh = self._read_kwh(self._forecast_tomorrow_entity)
         self.state.round_trip_efficiency = round(self._efficiency() * 100, 1)
+        self.state.efficiency_source = "measured" if self._eff_conv is not None else "default"
+        self.state.standby_used_w = round(self._standby_w(), 1)
+        charged = self.state.energy_charged_kwh
+        self.state.efficiency_lifetime = (
+            round(self.state.energy_discharged_kwh / charged * 100, 1) if charged > 0 else None
+        )
         local = dt_util.as_local(now)
         self.state.load_now_w = round(self._load.get(local.weekday(), local.hour))
         self.state.load_profile = self._load.table()
@@ -991,14 +1019,99 @@ class Charge44Coordinator:
         return latest
 
     def _efficiency(self) -> float:
-        """Round trip measured by the integration's own counters (energy out of
-        the battery / energy into it). The Zendure reports its conversions as
-        lossless, so every loss — charger, cells, inverter, standby — shows up
-        in this ratio. Fallback until enough energy has gone through."""
-        charged = self.state.energy_charged_kwh
-        if charged < EFFICIENCY_MIN_KWH:
-            return DEFAULT_EFFICIENCY / 100.0
-        return min(0.98, max(0.5, self.state.energy_discharged_kwh / charged))
+        """Conversion round trip of charging and discharging, with the hub's own
+        draw taken out (the plan models that draw separately, in every slot).
+        Measured from recorder statistics; fallback until that worked."""
+        return self._eff_conv if self._eff_conv is not None else DEFAULT_EFFICIENCY / 100.0
+
+    def _standby_w(self) -> float:
+        """Standby the plan assumes: fitted to the measured energy balance once
+        that worked, else the meter (from two windows on), else the default."""
+        if self._standby_fit is not None:
+            return self._standby_fit
+        return self._metered_standby_w()
+
+    def _metered_standby_w(self) -> float:
+        m = self._standby
+        if m.value_w is not None and m.windows >= 2:
+            return m.value_w
+        return DEFAULT_STANDBY_W
+
+    @callback
+    def _periodic_efficiency(self, _now) -> None:
+        self.hass.async_create_task(self._async_update_efficiency())
+
+    async def _async_update_efficiency(self) -> None:
+        """Measure the conversion round trip over the last weeks of hourly
+        statistics: battery energy in, out, SOC at both ends, hours covered."""
+        try:
+            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.statistics import (
+                statistics_during_period,
+            )
+            from homeassistant.helpers import entity_registry as er
+        except ImportError:
+            return
+        reg = er.async_get(self.hass)
+        entry_id = self.entry.entry_id
+        ids = {
+            key: reg.async_get_entity_id("sensor", DOMAIN, f"{entry_id}_{key}")
+            for key in ("energy_charged_total", "energy_discharged_total", "soc")
+        }
+        if not all(ids.values()):
+            return
+        end = dt_util.utcnow()
+        start = end - timedelta(days=EFFICIENCY_WINDOW_DAYS)
+        try:
+            stats = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                start,
+                end,
+                set(ids.values()),
+                "hour",
+                None,
+                {"change", "mean"},
+            )
+        except Exception as err:
+            _LOGGER.debug("charge44: efficiency statistics failed: %s", err)
+            return
+        self.apply_efficiency_statistics(stats, ids)
+
+    def apply_efficiency_statistics(
+        self, stats: dict[str, list[dict[str, Any]]], ids: dict[str, str]
+    ) -> None:
+        charged_rows = stats.get(ids["energy_charged_total"]) or []
+        charged = sum(r.get("change") or 0.0 for r in charged_rows)
+        discharged = sum(
+            r.get("change") or 0.0 for r in stats.get(ids["energy_discharged_total"]) or []
+        )
+        soc = [r["mean"] for r in stats.get(ids["soc"]) or [] if r.get("mean") is not None]
+        stored_delta = (
+            (soc[-1] - soc[0]) / 100.0 * self.state.battery_capacity if len(soc) >= 2 else 0.0
+        )
+        fit = fit_losses(
+            charged,
+            discharged,
+            float(len(charged_rows)),
+            self._metered_standby_w(),
+            stored_delta,
+            EFFICIENCY_CEILING,
+        )
+        if fit is None:
+            return
+        self._eff_conv, self._standby_fit = fit
+        self._replan_requested = True
+        _LOGGER.info(
+            "charge44: conversion round trip %.1f %%, standby %.1f W "
+            "(%.1f kWh in, %.1f out, %+.1f stored, %d h)",
+            self._eff_conv * 100,
+            self._standby_fit,
+            charged,
+            discharged,
+            stored_delta,
+            len(charged_rows),
+        )
 
     def _plan_due(
         self,
@@ -1097,6 +1210,8 @@ class Charge44Coordinator:
             charge_w=float(self.state.charge_power),
             output_w=float(self.state.max_output),
             efficiency=self._efficiency(),
+            standby_w=self._standby_w(),
+            floor_wh=cap_wh * max(0, self.state.min_soc - STANDBY_FLOOR_BELOW_MIN) / 100.0,
         )
         # Whether the device is grid-charging right now: stopping costs a mode
         # switch, so the plan won't cut a running charge for a fraction of a cent.

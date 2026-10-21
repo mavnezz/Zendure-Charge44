@@ -23,7 +23,7 @@ With a Tibber API token, charge44 plans every 15-minute slot of the known price 
 The plan minimises the grid bill. No thresholds to tune: it only buys energy whose later use pays for the round-trip losses, only as much as the expected house load needs, and leaves room for the sun. It re-plans every slot from the measured SOC, and on new prices or setting changes.
 
 ### 3. Battery ledger
-Tracks what the energy in the battery cost: grid charges at their price, PV at 0 €. Shown as **Battery cost basis** (ct/kWh); the EUR counters count real grid charging only.
+Tracks what the usable energy in the battery (above SOC Min) cost: grid charges at their price, PV at 0 €. Shown as **Battery cost basis** (ct/kWh); the EUR counters count real grid charging only.
 
 ### 4. Manual charge & standby protection
 - **Charge Manual** — one-shot grid charge to SOC Max, regardless of price.
@@ -84,10 +84,10 @@ Entity IDs below are the usual ones; Home Assistant may prefix new entities with
 | **Planned action** | `charge` / `hold` / `normal` for the current slot; attributes `plan` (every slot: start, action, SOC, price), `plan_cost_eur`, `baseline_cost_eur` (same horizon without battery) |
 | `sensor.charge44_next_cheap_window` (**Next grid charge**) | start of the next planned charge slot |
 | `sensor.charge44_cheap_charge_active` (**Grid charging**) | "on"/"off"; attribute `reason`: `optimizer`, `manual`, `reserve` |
-| **Round-trip efficiency** | measured: energy out of the battery ÷ energy into it (85 % until 50 kWh have gone in) |
+| **Round-trip efficiency** | conversion round trip the plan uses, with the hub's own draw taken out (measured over 28 days, ≤ 95 %; 85 % until measured); attributes `source`, `standby_w` (the standby the plan assumes), `lifetime_out_in_pct` |
 | **House load forecast** | expected load this hour; attribute `profile` (7 days × 24 h) |
-| **Battery cost basis** | average cost of the stored energy (ct/kWh); attribute `ledger_eur` |
-| **Standby consumption** | the hub's own draw from the battery, measured while idle (W); attributes `windows`, `last_window_w`, `last_window_hours` — display only for now |
+| **Battery cost basis** | average cost of the usable energy above SOC Min (ct/kWh); attribute `ledger_eur` |
+| **Standby consumption** | the hub's own draw from the battery, measured while idle (W); attributes `windows`, `last_window_w`, `last_window_hours` |
 | `sensor.charge44_solar_forecast_remaining`, **Solar forecast tomorrow** | kWh from your forecast sensors |
 | `sensor.charge44_cost_charged_today` / `_total` | cost of grid charging (EUR) |
 | `sensor.charge44_discharge_value_today` / `_total` | value of discharged energy (EUR) |
@@ -144,7 +144,9 @@ Dynamic programming over the energy stored in the battery (20 Wh steps), slot by
 inputs   prices            Tibber, 15-min (or hourly) slots
          SOC, SOC Min/Max  live / sliders
          charge power      1000 W (inputLimit), inverter ceiling from inverseMaxPower
-         round trip η      energy out ÷ energy in (own counters), split √η in / √η out
+         round trip η      conversion round trip without the hub's own draw,
+                           split √η in / √η out
+         standby           the hub's own draw, taken from the battery in every slot
          house load        weekday × hour profile
          PV                remaining-today / tomorrow kWh, spread along a sun bow
                            between sunrise and sunset
@@ -155,25 +157,28 @@ per slot  charge  house from grid, grid + PV into the battery (up to SOC Max)
           normal  PV covers the house first, the battery the rest (down to
                   SOC Min, within the inverter ceiling), surplus PV charges
 
-minimise  Σ grid import × price
+minimise  Σ grid import × price  (+ a prohibitive penalty for letting the
+          standby drain the battery below SOC Min − 2 %)
 ```
+**Standby:** the hub keeps drawing from a parked battery (output 0 or at SOC Min). The plan takes that draw out every slot and must not let it sink the battery more than 2 % below SOC Min — so it keeps a buffer or tops up at the cheapest moment in time, instead of leaving it to the price-blind reserve top-up one step further down.
+
 Energy still in the battery at the end of the horizon is valued at the cheapest known price, so the plan never buys speculatively beyond what it can use within the known prices; tomorrow's prices (~13:00) extend the horizon and the plan. Only the current slot is executed; it re-plans every slot from the measured SOC, on new prices, on SOC Min/Max changes and when the SOC drifts ≥ 3 % from the plan. The calculation (~0.1 s) runs in an executor.
 
 **Load profile:** one average per weekday and hour (7 × 24). Seeded at startup from the last 28 days of recorder statistics (Shelly grid power + Zendure output − Zendure grid input), then learned live; each weekday-hour moves with weight ¼ per week (~4-week memory). Hours without data fall back to the same hour on other days.
 
-**Round trip:** the Zendure reports its conversions as lossless, so every loss — charger, cells, inverter, standby — shows up in energy out ÷ energy in. Until 50 kWh have gone in, 85 % is assumed.
+**Round trip and standby:** the Zendure reports its conversions as lossless, so all losses only show up as energy that went into the battery and never came out. Over the last 28 days of statistics (re-measured daily): losses = energy in − energy out − extra still stored. The standby meter's value (25 W until it has two windows) is taken out of that, the rest is the conversion round trip. Cells plus inverter can't beat 95 %; if the metered standby alone would push the round trip past that, the round trip is capped and the standby fitted to the balance instead — the energy balance is the hard number. Until the statistics are read, 85 % is assumed.
 
 **Standby protection (reserve top-up):** below SOC Min the regulation parks the output at 0 W, but the hub's own consumption (~10 W) keeps draining the battery. When SOC falls 3 % below SOC Min (e.g. 7 % at SOC Min 10 %), charge44 grid-charges back to SOC Min + 3 % regardless of price (~0.25 kWh per top-up). Only the temperature guard blocks it; `stop_charge` does not. SOC Min 0 % disables it.
 
 ### Standby meter
-The hub draws power for itself that its readings never show (it reports conversions as lossless) — only the SOC sinks. While the battery is idle (no charge, no discharge, no PV, no grid input) every 1 % step down is that drain. A window is timed from its first to its last step (≥ 2 steps, ≥ 2 h), so the 1 % resolution doesn't skew it; a drop of more than 1 % at once or faster than 1 % per 10 min is a BMS correction and restarts the window. Running mean over the first five windows, then an EMA. Not yet used by the optimizer.
+The hub draws power for itself that its readings never show (it reports conversions as lossless) — only the SOC sinks. While the battery is idle (no charge, no discharge, no PV, no grid input) every 1 % step down is that drain. A window is timed from its first to its last step (≥ 2 steps, ≥ 2 h), so the 1 % resolution doesn't skew it; a drop of more than 1 % at once or faster than 1 % per 10 min is a BMS correction and restarts the window. Running mean over the first five windows, then an EMA. Feeds the optimizer through the energy-balance fit above.
 
 ### Battery ledger
 ```
 charge     ledger += grid share × price      (grid share = min(grid input, battery charge); PV is free)
-discharge  ledger −= kWh out × ledger / stored
-cost basis = ledger / stored                  (stored = SOC × capacity; losses raise it)
-empty      ledger = 0
+discharge  ledger −= kWh out × ledger / usable
+cost basis = ledger / usable                  (usable = (SOC − SOC Min) × capacity; losses raise it)
+SOC Min    ledger = 0                         (the rest is written off)
 ```
 
 ### Mode transitions
@@ -205,7 +210,7 @@ pytest tests/ -v
 Suites:
 - `tests/test_optimizer.py` — the DP: charging only when it pays, holding for pricier slots, partial charges, PV, negative prices, SOC limits; sun-bow PV distribution
 - `tests/test_load_profile.py` — weekday × hour profile, learning, fallbacks
-- `tests/test_standby.py` — standby-drain windows, BMS corrections, averaging
+- `tests/test_standby.py` — standby-drain windows, BMS corrections, averaging, loss split / energy-balance fit
 - `tests/test_plan_execution.py` — planning inputs, executing the current slot, re-plan triggers, ledger, measured round trip, load learning
 - `tests/test_regulation.py` — PI loop + optimizer hold (safety blocks, deadzone, acMode self-heal, publish pacing)
 - `tests/test_publish.py` — MQTT topics + payloads (grid-charge commands, minSoc forwarding)

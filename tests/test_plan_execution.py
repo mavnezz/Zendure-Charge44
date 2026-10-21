@@ -73,6 +73,9 @@ def test_full_battery_holds_through_cheap_hours(opt):
 
 
 def test_flat_prices_run_normal(opt):
+    """Without standby drain nothing beats just covering the house. (With it,
+    holding a buffer instead of buying the drain back later can be cheaper.)"""
+    opt._standby_fit = 0.0
     _set_prices(opt, [0.30] * 24)
     opt.plan_now()
     opt._evaluate()
@@ -165,6 +168,8 @@ def test_plan_inputs(opt):
     assert bat.max_wh == pytest.approx(3840.0)
     assert energy == pytest.approx(1536.0)
     assert charging is False
+    assert bat.standby_w == 25.0  # default until the meter has two windows
+    assert bat.floor_wh == pytest.approx(3840.0 * 0.08)  # SOC Min 10 % − 2 %
 
 
 def test_pv_days_from_forecast_and_sun(opt):
@@ -201,21 +206,23 @@ def test_ledger_grid_charge_costs_pv_is_free(opt):
 
 
 def test_ledger_discharge_at_average_cost(opt):
-    opt.state.soc = 50  # 1.92 kWh stored
-    opt.state.ledger_eur = 0.384  # 20 ct/kWh
+    opt.state.soc = 50  # 1.536 kWh usable above SOC Min 10 %
+    opt.state.ledger_eur = 0.384  # 25 ct/kWh
     opt.state.current_price = 0.35
     opt.state.pack_output = 960.0
-    _tick_energy(opt)  # 30 min: takes 0.48 kWh at 20 ct
-    assert opt.state.ledger_eur == pytest.approx(0.288, rel=1e-3)
+    _tick_energy(opt)  # 30 min: takes 0.48 kWh at 25 ct
+    assert opt.state.ledger_eur == pytest.approx(0.264, rel=1e-3)
     assert opt.state.value_discharged_total_eur == pytest.approx(0.168, rel=1e-3)
 
 
-def test_cost_basis_and_empty_reset(opt):
+def test_cost_basis_on_usable_energy_written_off_at_soc_min(opt):
+    """Only the energy above SOC Min counts; reaching SOC Min writes the rest
+    off — the battery no longer gets to 0 %, so costs piled up before."""
     opt.state.soc = 50
     opt.state.ledger_eur = 0.384
     opt._update_cost_basis()
-    assert opt.state.cost_basis_ct == pytest.approx(20.0)
-    opt.state.soc = 0
+    assert opt.state.cost_basis_ct == pytest.approx(25.0)
+    opt.state.soc = 10  # SOC Min
     opt._update_cost_basis()
     assert opt.state.ledger_eur == 0.0
     assert opt.state.cost_basis_ct is None
@@ -234,13 +241,49 @@ def test_ledger_falls_back_without_grid_input_reading(opt):
 
 # --- measured round trip ------------------------------------------------------
 
-def test_efficiency_fallback_then_measured(opt):
-    opt.state.energy_charged_kwh = 10.0
-    opt.state.energy_discharged_kwh = 5.0
+IDS = {
+    "energy_charged_total": "sensor.charged",
+    "energy_discharged_total": "sensor.discharged",
+    "soc": "sensor.soc",
+}
+
+
+def _stats(hours, charged, discharged, soc_start, soc_end):
+    return {
+        "sensor.charged": [{"change": charged / hours}] * hours,
+        "sensor.discharged": [{"change": discharged / hours}] * hours,
+        "sensor.soc": [{"mean": soc_start}] + [{"mean": 50}] * (hours - 2) + [{"mean": soc_end}],
+    }
+
+
+def test_efficiency_default_until_measured(opt):
     assert opt._efficiency() == pytest.approx(0.85)
-    opt.state.energy_charged_kwh = 509.769
-    opt.state.energy_discharged_kwh = 405.671
-    assert opt._efficiency() == pytest.approx(0.7958, abs=1e-4)
+
+
+def test_efficiency_measured_with_standby_taken_out(opt):
+    """28 days: 85 kWh in, 60 out, SOC unchanged; 10 W standby → 6.72 kWh
+    drawn by the hub → (60 + 6.72) / 85 = 78.5 %."""
+    opt._standby.restore(10.0, 3)
+    opt.apply_efficiency_statistics(_stats(672, 85.0, 60.0, 30, 30), IDS)
+    assert opt._efficiency() == pytest.approx(0.785, abs=0.001)
+    assert opt._replan_requested is True
+
+
+def test_efficiency_capped_and_standby_fitted_to_the_balance(opt):
+    """Meter says 27 W, but only 15 kWh went missing in 672 h: the round trip
+    caps at 95 % and the standby is fitted so both add up to the 15 kWh."""
+    opt._standby.restore(27.0, 3)
+    opt.apply_efficiency_statistics(_stats(672, 85.0, 70.0, 30, 30), IDS)
+    assert opt._efficiency() == 0.95
+    assert opt._standby_w() == pytest.approx((15.0 - 0.05 * 85.0) * 1000 / 672, abs=0.1)
+
+
+def test_standby_default_until_two_windows(opt):
+    assert opt._standby_w() == 25.0
+    opt._standby.restore(27.0, 1)
+    assert opt._standby_w() == 25.0
+    opt._standby.restore(27.0, 2)
+    assert opt._standby_w() == 27.0
 
 
 # --- load learning ------------------------------------------------------------
