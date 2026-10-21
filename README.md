@@ -87,6 +87,7 @@ Entity IDs below are the usual ones; Home Assistant may prefix new entities with
 | **Round-trip efficiency** | measured: energy out of the battery ÷ energy into it (85 % until 50 kWh have gone in) |
 | **House load forecast** | expected load this hour; attribute `profile` (7 days × 24 h) |
 | **Battery cost basis** | average cost of the stored energy (ct/kWh); attribute `ledger_eur` |
+| **Standby consumption** | the hub's own draw from the battery, measured while idle (W); attributes `windows`, `last_window_w`, `last_window_hours` — display only for now |
 | `sensor.charge44_solar_forecast_remaining`, **Solar forecast tomorrow** | kWh from your forecast sensors |
 | `sensor.charge44_cost_charged_today` / `_total` | cost of grid charging (EUR) |
 | `sensor.charge44_discharge_value_today` / `_total` | value of discharged energy (EUR) |
@@ -164,6 +165,9 @@ Energy still in the battery at the end of the horizon is valued at the cheapest 
 
 **Standby protection (reserve top-up):** below SOC Min the regulation parks the output at 0 W, but the hub's own consumption (~10 W) keeps draining the battery. When SOC falls 3 % below SOC Min (e.g. 7 % at SOC Min 10 %), charge44 grid-charges back to SOC Min + 3 % regardless of price (~0.25 kWh per top-up). Only the temperature guard blocks it; `stop_charge` does not. SOC Min 0 % disables it.
 
+### Standby meter
+The hub draws power for itself that its readings never show (it reports conversions as lossless) — only the SOC sinks. While the battery is idle (no charge, no discharge, no PV, no grid input) every 1 % step down is that drain. A window is timed from its first to its last step (≥ 2 steps, ≥ 2 h), so the 1 % resolution doesn't skew it; a drop of more than 1 % at once or faster than 1 % per 10 min is a BMS correction and restarts the window. Running mean over the first five windows, then an EMA. Not yet used by the optimizer.
+
 ### Battery ledger
 ```
 charge     ledger += grid share × price      (grid share = min(grid input, battery charge); PV is free)
@@ -201,6 +205,7 @@ pytest tests/ -v
 Suites:
 - `tests/test_optimizer.py` — the DP: charging only when it pays, holding for pricier slots, partial charges, PV, negative prices, SOC limits; sun-bow PV distribution
 - `tests/test_load_profile.py` — weekday × hour profile, learning, fallbacks
+- `tests/test_standby.py` — standby-drain windows, BMS corrections, averaging
 - `tests/test_plan_execution.py` — planning inputs, executing the current slot, re-plan triggers, ledger, measured round trip, load learning
 - `tests/test_regulation.py` — PI loop + optimizer hold (safety blocks, deadzone, acMode self-heal, publish pacing)
 - `tests/test_publish.py` — MQTT topics + payloads (grid-charge commands, minSoc forwarding)

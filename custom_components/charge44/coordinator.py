@@ -58,6 +58,7 @@ from .const import (
     RESERVE_TARGET_ABOVE,
     RESERVE_TRIGGER_BELOW,
     SAFETY_TICK_INTERVAL,
+    STANDBY_IDLE_W,
     SIGNAL_UPDATE,
     STALE_GRID_AFTER,
     TARGET_SOC_MIN,
@@ -74,6 +75,7 @@ from .const import (
 )
 from .discovery import clear_legacy_discovery, pack_info, publish_zendure_discovery
 from .load_profile import LoadProfile
+from .standby import StandbyMeter
 from .optimizer import (
     CHARGE,
     HOLD,
@@ -173,6 +175,12 @@ class State:
     today_max_price: float | None = None
     today_min_price: float | None = None
 
+    # Hub's own draw from the battery, measured while idle (display only)
+    standby_w: float | None = None
+    standby_windows: int = 0
+    standby_last_w: float | None = None
+    standby_last_hours: float | None = None
+
     # Battery ledger: what the stored energy cost (grid at its price, PV free)
     ledger_eur: float = 0.0
     cost_basis_ct: float | None = None
@@ -238,6 +246,7 @@ class Charge44Coordinator:
         self._stall_watch_since: float | None = None
         self._charge_seen_ts: float | None = None  # last real charge into the battery
         self._load = LoadProfile()
+        self._standby = StandbyMeter()
         self._plan_steps: list[Step] = []
         self._plan_slot: datetime | None = None  # price slot the plan was made in
         self._plan_soc: int | None = None
@@ -368,6 +377,7 @@ class Charge44Coordinator:
                 self.state.grid_power = float(em["total_act_power"])
                 self.state.grid_power_ts = time.monotonic()
                 self._integrate_energy()
+                self._track_standby()
                 self._tick()
                 self._notify()
         except Exception as err:
@@ -429,6 +439,36 @@ class Charge44Coordinator:
                 - max(0.0, self.state.grid_input_power or 0.0)
             )
             self._load.sample(dt_util.now(), max(0.0, load), dt_hours)
+
+    def _track_standby(self) -> None:
+        """Feed the standby meter: idle = nothing flows in or out of the
+        battery, no PV, no grid input, not grid-charging."""
+        s = self.state
+        idle = (
+            not s.cheap_mode_active
+            and s.pack_input is not None
+            and s.pack_output is not None
+            and max(
+                s.pack_input,
+                s.pack_output,
+                s.solar_input or 0.0,
+                s.grid_input_power or 0.0,
+            )
+            <= STANDBY_IDLE_W
+        )
+        self._standby.update(
+            time.monotonic(), s.soc, idle, s.battery_capacity * 1000.0
+        )
+        m = self._standby
+        s.standby_w = None if m.value_w is None else round(m.value_w, 1)
+        s.standby_windows = m.windows
+        s.standby_last_w = m.last_w
+        s.standby_last_hours = m.last_hours
+
+    def restore_standby(self, value_w: float, windows: int) -> None:
+        self._standby.restore(value_w, windows)
+        self.state.standby_w = round(value_w, 1)
+        self.state.standby_windows = self._standby.windows
 
     def _stored_kwh(self) -> float | None:
         if self.state.soc is None:

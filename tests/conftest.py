@@ -109,6 +109,7 @@ def coord():
     """Build a Charge44Coordinator with __new__ — no HA setup, fresh State."""
     from charge44.coordinator import Charge44Coordinator, State
     from charge44.load_profile import LoadProfile
+    from charge44.standby import StandbyMeter
 
     obj = Charge44Coordinator.__new__(Charge44Coordinator)
     obj.state = State()
@@ -130,6 +131,7 @@ def coord():
     obj._stall_watch_since = None
     obj._charge_seen_ts = None
     obj._load = LoadProfile()
+    obj._standby = StandbyMeter()
     obj._plan_steps = []
     obj._plan_slot = None
     obj._plan_soc = None
