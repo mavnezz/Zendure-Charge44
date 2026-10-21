@@ -193,6 +193,11 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
         suggested_display_precision=1,
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda s: s.round_trip_efficiency,
+        attrs_fn=lambda s: {
+            "source": s.efficiency_source,
+            "standby_w": s.standby_used_w,
+            "lifetime_out_in_pct": s.efficiency_lifetime,
+        },
     ),
     Charge44SensorDescription(
         key="load_forecast",

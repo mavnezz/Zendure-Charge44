@@ -70,3 +70,31 @@ class StandbyMeter:
             self.value_w = watts
         else:
             self.value_w += (watts - self.value_w) / min(self.windows, AVERAGE_OVER)
+
+
+def fit_losses(
+    charged_kwh: float,
+    discharged_kwh: float,
+    hours: float,
+    standby_w: float,
+    stored_delta_kwh: float,
+    ceiling: float,
+) -> tuple[float, float] | None:
+    """Split the battery's measured losses into conversion round trip and the
+    hub's own draw: (efficiency, standby W).
+
+    Losses over the window = energy in − energy out − extra still stored at the
+    end. With `standby_w` from the meter, the conversion round trip is
+    1 − (losses − standby) / in. The energy balance is the hard number: if the
+    meter's standby alone exceeds what went missing (round trip above
+    `ceiling`, which cells plus inverter can't beat), the round trip is capped
+    and the standby fitted to the balance instead. None without data.
+    """
+    if charged_kwh <= 0 or hours <= 0:
+        return None
+    losses = charged_kwh - discharged_kwh - stored_delta_kwh
+    eff = 1.0 - (losses - standby_w * hours / 1000.0) / charged_kwh
+    if eff > ceiling:
+        eff = ceiling
+        standby_w = max(0.0, (losses - (1.0 - eff) * charged_kwh) * 1000.0 / hours)
+    return max(0.5, eff), standby_w
