@@ -45,18 +45,30 @@ def test_steps_too_fast_are_a_correction():
     assert m.value_w == pytest.approx(2 / 100 * CAP / 4.0, abs=0.5)
 
 
+def test_single_step_window_counts():
+    """At SOC Min the plan tops up after ~2 %, so windows are short: one step
+    between two step boundaries is enough (2026-10-22: 9 → 8 % in 63 min)."""
+    m = StandbyMeter()
+    _night(m, [(0.5, 10), (1.55, 9)])
+    m.update(2 * H, 9, False, CAP)
+    assert m.windows == 1
+    assert m.value_w == pytest.approx(38.4 / 1.05, abs=0.2)
+
+
 def test_short_or_flat_windows_are_ignored():
     m = StandbyMeter()
-    _night(m, [(0.5, 28), (1.5, 27)])  # one hour, one step
+    _night(m, [(0.5, 28), (1.0, 27)])  # one step, only 30 min apart
     m.update(2 * H, 27, False, CAP)
+    _night(m, [(3.0, 27)], start_soc=27, start_ts=2 * H)  # no step at all
+    m.update(5 * H, 27, False, CAP)
     assert m.windows == 0 and m.value_w is None
 
 
 def test_rising_soc_resets():
     m = StandbyMeter()
-    _night(m, [(0.5, 28), (2.0, 27), (2.5, 28), (4.0, 27), (5.5, 26)])
+    _night(m, [(0.5, 28), (2.0, 27), (2.5, 28), (4.0, 27), (4.5, 26)])
     m.update(6 * H, 26, False, CAP)
-    # restart after the rise: 27 at 4.0 h → 26 at 5.5 h is too short
+    # restart after the rise: 27 at 4.0 h → 26 at 4.5 h is too short
     assert m.windows == 0
 
 

@@ -196,6 +196,7 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
         attrs_fn=lambda s: {
             "source": s.efficiency_source,
             "standby_w": s.standby_used_w,
+            "standby_balance_w": s.standby_balance_w,
             "lifetime_out_in_pct": s.efficiency_lifetime,
         },
     ),

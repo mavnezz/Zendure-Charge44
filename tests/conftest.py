@@ -133,7 +133,7 @@ def coord():
     obj._load = LoadProfile()
     obj._standby = StandbyMeter()
     obj._eff_conv = None
-    obj._standby_fit = None
+    obj._standby_balance = None
     obj._plan_steps = []
     obj._plan_slot = None
     obj._plan_soc = None

@@ -170,6 +170,7 @@ class State:
     efficiency_source: str = "default"  # measured | default
     efficiency_lifetime: float | None = None  # %, energy out / in incl. standby
     standby_used_w: float | None = None  # W, standby the plan assumes
+    standby_balance_w: float | None = None  # W, standby that fits the 28-day balance
     load_now_w: float | None = None  # load-profile value for this hour
     load_profile: dict[str, list[float]] = field(default_factory=dict)
 
@@ -254,7 +255,7 @@ class Charge44Coordinator:
         self._load = LoadProfile()
         self._standby = StandbyMeter()
         self._eff_conv: float | None = None
-        self._standby_fit: float | None = None  # standby consistent with the balance
+        self._standby_balance: float | None = None  # standby that fits the energy balance
         self._plan_steps: list[Step] = []
         self._plan_slot: datetime | None = None  # price slot the plan was made in
         self._plan_soc: int | None = None
@@ -1025,10 +1026,12 @@ class Charge44Coordinator:
         return self._eff_conv if self._eff_conv is not None else DEFAULT_EFFICIENCY / 100.0
 
     def _standby_w(self) -> float:
-        """Standby the plan assumes: fitted to the measured energy balance once
-        that worked, else the meter (from two windows on), else the default."""
-        if self._standby_fit is not None:
-            return self._standby_fit
+        """How fast the plan lets a parked battery sink: the meter (from two
+        windows on), else the default. This is what moves the displayed SOC —
+        and SOC Min, the floor and the reserve top-up all act on that. The
+        energy-balance figure is lower (the SOC falls faster near the bottom
+        than the kWh counters suggest); using it made the plan reach the floor
+        early and top up in 6-minute bits (night of 2026-10-21)."""
         return self._metered_standby_w()
 
     def _metered_standby_w(self) -> float:
@@ -1100,13 +1103,14 @@ class Charge44Coordinator:
         )
         if fit is None:
             return
-        self._eff_conv, self._standby_fit = fit
+        self._eff_conv, self._standby_balance = fit
+        self.state.standby_balance_w = round(self._standby_balance, 1)
         self._replan_requested = True
         _LOGGER.info(
-            "charge44: conversion round trip %.1f %%, standby %.1f W "
+            "charge44: conversion round trip %.1f %%, balance standby %.1f W "
             "(%.1f kWh in, %.1f out, %+.1f stored, %d h)",
             self._eff_conv * 100,
-            self._standby_fit,
+            self._standby_balance,
             charged,
             discharged,
             stored_delta,
