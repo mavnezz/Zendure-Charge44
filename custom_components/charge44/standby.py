@@ -12,8 +12,8 @@ Pure Python, no Home Assistant imports.
 """
 from __future__ import annotations
 
-MIN_STEPS = 2  # % of SOC a window must span
-MIN_HOURS = 2.0
+MIN_STEPS = 1  # % of SOC a window must span
+MIN_HOURS = 0.75  # ...between its first and last step
 MIN_STEP_GAP_S = 600.0  # idle drain is far slower than 1 % per 10 min
 AVERAGE_OVER = 5  # running mean of the first windows, then EMA with weight 1/5
 

@@ -84,6 +84,9 @@ def _plan(ctl, prices):
 
 
 def test_stop_charge_holds_until_planned_charge_ends(ctl):
+    # No standby drain: with it, flat expensive prices still need a top-up
+    # some time, and "nothing left to charge" would not hold.
+    ctl._standby.restore(0.0, 2)
     ctl.state.optimizer_enabled = True
     _plan(ctl, CHEAP_NOW)
     assert ctl.state.cheap_mode_active is True

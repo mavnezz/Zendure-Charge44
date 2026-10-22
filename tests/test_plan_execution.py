@@ -168,7 +168,7 @@ def test_plan_inputs(opt):
     assert bat.max_wh == pytest.approx(3840.0)
     assert energy == pytest.approx(1536.0)
     assert charging is False
-    assert bat.standby_w == 25.0  # default until the meter has two windows
+    assert bat.standby_w == 30.0  # default until the meter has two windows
     assert bat.floor_wh == pytest.approx(3840.0 * 0.08)  # SOC Min 10 % − 2 %
 
 
@@ -269,19 +269,21 @@ def test_efficiency_measured_with_standby_taken_out(opt):
     assert opt._replan_requested is True
 
 
-def test_efficiency_capped_and_standby_fitted_to_the_balance(opt):
+def test_efficiency_capped_plan_keeps_metered_standby(opt):
     """Meter says 27 W, but only 15 kWh went missing in 672 h: the round trip
-    caps at 95 % and the standby is fitted so both add up to the 15 kWh."""
+    caps at 95 %. The balance's standby is shown, but the plan keeps the
+    metered SOC drop — that is what reaches the floor."""
     opt._standby.restore(27.0, 3)
     opt.apply_efficiency_statistics(_stats(672, 85.0, 70.0, 30, 30), IDS)
     assert opt._efficiency() == 0.95
-    assert opt._standby_w() == pytest.approx((15.0 - 0.05 * 85.0) * 1000 / 672, abs=0.1)
+    assert opt._standby_w() == 27.0
+    assert opt.state.standby_balance_w == pytest.approx((15.0 - 0.05 * 85.0) * 1000 / 672, abs=0.1)
 
 
 def test_standby_default_until_two_windows(opt):
-    assert opt._standby_w() == 25.0
+    assert opt._standby_w() == 30.0
     opt._standby.restore(27.0, 1)
-    assert opt._standby_w() == 25.0
+    assert opt._standby_w() == 30.0
     opt._standby.restore(27.0, 2)
     assert opt._standby_w() == 27.0
 
