@@ -30,6 +30,7 @@ for name in (
     "homeassistant.helpers.dispatcher",
     "homeassistant.helpers.entity_registry",
     "homeassistant.helpers.event",
+    "homeassistant.helpers.storage",
     "homeassistant.util",
     "homeassistant.util.dt",
 ):
@@ -55,6 +56,7 @@ sys.modules["homeassistant.helpers.aiohttp_client"].async_get_clientsession = (
     MagicMock()
 )
 sys.modules["homeassistant.components.mqtt"].async_publish = MagicMock()
+sys.modules["homeassistant.helpers.storage"].Store = MagicMock
 
 
 def _now() -> datetime.datetime:
@@ -78,6 +80,9 @@ sys.modules["homeassistant.util.dt"].now = _now
 sys.modules["homeassistant.util.dt"].parse_datetime = _parse_datetime
 sys.modules["homeassistant.util.dt"].utcnow = _now
 sys.modules["homeassistant.util.dt"].as_local = _as_local
+sys.modules["homeassistant.util.dt"].utc_from_timestamp = (
+    lambda ts: datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+)
 
 # --- aiohttp (only TibberApiClient touches it; we don't exercise that path) ---
 if "aiohttp" not in sys.modules:
@@ -131,6 +136,8 @@ def coord():
     obj._stall_watch_since = None
     obj._charge_seen_ts = None
     obj._load = LoadProfile()
+    obj._coverable = LoadProfile()
+    obj._store = MagicMock()
     obj._standby = StandbyMeter()
     obj._eff_conv = None
     obj._standby_balance = None

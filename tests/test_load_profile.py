@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import datetime
 
-from charge44.load_profile import DEFAULT_W, LoadProfile
+from charge44.load_profile import DEFAULT_W, LoadProfile, hourly_means
 
 MON = datetime.datetime(2026, 10, 19, 0, 0)  # a Monday
 
@@ -58,3 +58,35 @@ def test_table_has_seven_days_of_24_hours():
     t = LoadProfile().table()
     assert list(t) == ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
     assert all(len(v) == 24 for v in t.values())
+
+
+def test_hourly_means_fold_whole_hours():
+    five = datetime.timedelta(minutes=5)
+    readings = [(MON.replace(hour=10) + i * five, 100.0) for i in range(11)]
+    readings.append((MON.replace(hour=10, minute=55), 1300.0))
+    readings += [(MON.replace(hour=11) + i * five, 200.0) for i in range(6)]  # 30 min
+    readings += [(MON.replace(hour=12) + i * five, 300.0) for i in range(5)]  # 25 min
+    assert hourly_means(readings, 5 / 60) == [
+        (MON.replace(hour=10), 200.0),
+        (MON.replace(hour=11), 200.0),
+    ]
+
+
+def test_fold_reports_and_remembers_the_hour():
+    p = LoadProfile()
+    t = MON.replace(hour=10)
+    assert not any(p.sample(t + datetime.timedelta(minutes=5 * i), 600.0, 5 / 60) for i in range(12))
+    assert p.sample(MON.replace(hour=11), 100.0, 5 / 60) is True
+    assert p.last_hour == MON.replace(hour=10)
+
+
+def test_persisted_profile_round_trip():
+    p = LoadProfile()
+    p.add(MON.replace(hour=18), 300.0)
+    p.add(MON.replace(hour=17), 500.0)  # older hour: last_hour stays
+    q = LoadProfile()
+    q.restore(p.to_dict())
+    assert q.get(0, 18) == 300.0 and q.get(0, 17) == 500.0
+    assert q.last_hour == MON.replace(hour=18)
+    q.add_hour(0, 18, 500.0)  # the count came back too: mean of two
+    assert q.get(0, 18) == 400.0

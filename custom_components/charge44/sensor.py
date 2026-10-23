@@ -207,7 +207,15 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
         device_class=SensorDeviceClass.POWER,
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda s: s.load_now_w,
-        attrs_fn=lambda s: {"profile": s.load_profile} if s.load_profile else {},
+        attrs_fn=lambda s: (
+            {
+                "profile": s.load_profile,
+                "coverable_w": s.coverable_now_w,
+                "coverable_profile": s.coverable_profile,
+            }
+            if s.load_profile
+            else {}
+        ),
     ),
     Charge44SensorDescription(
         key="solar_remaining_kwh",
@@ -237,7 +245,7 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
     ),
     Charge44SensorDescription(
         key="today_max_price",
-        name="Today max price",
+        name="Max price next 24 h",
         native_unit_of_measurement="ct/kWh",
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=2,
@@ -245,7 +253,7 @@ SENSORS: tuple[Charge44SensorDescription, ...] = (
     ),
     Charge44SensorDescription(
         key="today_min_price",
-        name="Today min price",
+        name="Min price next 24 h",
         native_unit_of_measurement="ct/kWh",
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=2,
@@ -312,6 +320,10 @@ COST_SENSORS: tuple[tuple[str, str, str, bool], ...] = (
 )
 
 
+def _float_or_none(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -335,7 +347,7 @@ async def async_setup_entry(
 class Charge44Sensor(Charge44Entity, SensorEntity):
     entity_description: Charge44SensorDescription
     # Price list, plan and load profile are for dashboard cards, not the database.
-    _unrecorded_attributes = frozenset({"prices_24h", "plan", "profile"})
+    _unrecorded_attributes = frozenset({"prices_24h", "plan", "profile", "coverable_profile"})
 
     def __init__(
         self, coordinator: Charge44Coordinator, description: Charge44SensorDescription
@@ -494,9 +506,13 @@ class Charge44StandbySensor(Charge44Entity, RestoreSensor):
         last_state = await self.async_get_last_state()
         if last is None or last.native_value is None or last_state is None:
             return
+        attrs = last_state.attributes
         try:
             self.coordinator.restore_standby(
-                float(last.native_value), int(last_state.attributes.get("windows", 1))
+                float(last.native_value),
+                int(attrs.get("windows", 1)),
+                _float_or_none(attrs.get("last_window_w")),
+                _float_or_none(attrs.get("last_window_hours")),
             )
         except (TypeError, ValueError):
             pass

@@ -28,9 +28,17 @@ class StandbyMeter:
         self._anchor: tuple[float, int] | None = None  # first step of the window
         self._tail: tuple[float, int] | None = None  # latest step
 
-    def restore(self, value_w: float, windows: int) -> None:
+    def restore(
+        self,
+        value_w: float,
+        windows: int,
+        last_w: float | None = None,
+        last_hours: float | None = None,
+    ) -> None:
         self.value_w = value_w
         self.windows = max(1, windows)
+        self.last_w = last_w
+        self.last_hours = last_hours
 
     def update(self, ts: float, soc: int | None, idle: bool, capacity_wh: float) -> None:
         """Feed one reading (`ts` in seconds, monotonic)."""

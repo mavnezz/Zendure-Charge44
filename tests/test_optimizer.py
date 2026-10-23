@@ -143,6 +143,36 @@ def test_running_charge_not_cut_for_a_fraction_of_a_cent():
     assert optimise(_slots(prices), bat, 384.0, charging=True)[0].action == CHARGE
 
 
+# --- coverable load -----------------------------------------------------------
+
+def test_battery_covers_only_the_coverable_load():
+    """600 Wh mean load, but only 150 Wh of it below the inverter ceiling at
+    every moment: the rest comes from the grid even with a full battery."""
+    slot = Slot(T0, 1.0, 0.40, 600.0, 0.0, coverable_wh=150.0)
+    steps = optimise([slot], _bat(), 3000.0)
+    assert steps[0].action == NORMAL
+    assert steps[0].grid_wh == pytest.approx(450.0)
+
+
+def test_charges_only_for_the_coverable_load():
+    """Ten expensive hours of 600 W, of which 150 W coverable: 1.5 kWh of
+    output is two charge hours (~0.9 kWh each), not a full battery (four)."""
+    def charge_hours(coverable):
+        slots = [
+            Slot(T0 + i * H, 1.0, p, 600.0, 0.0, coverable)
+            for i, p in enumerate([0.15] * 4 + [0.40] * 10)
+        ]
+        return _actions(optimise(slots, _bat(), 384.0)).count(CHARGE)
+
+    assert charge_hours(None) == 4
+    assert charge_hours(150.0) == 2
+
+
+def test_baseline_counts_pv_only_up_to_the_coverable_load():
+    slot = Slot(T0, 1.0, 0.40, 600.0, 500.0, coverable_wh=150.0)
+    assert baseline_cost([slot], 800.0) == pytest.approx(0.450 * 0.40)
+
+
 # --- standby drain ------------------------------------------------------------
 
 def test_standby_drain_shows_in_the_plan():
