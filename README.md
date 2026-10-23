@@ -20,7 +20,7 @@ With a Tibber API token, charge44 plans every 15-minute slot of the known price 
 - **hold** — keep the stored energy for pricier slots later (output 0; the house runs on grid, PV still charges the battery),
 - **normal** — zero-export regulation (PV and battery cover the house).
 
-The plan minimises the grid bill. No thresholds to tune: it only buys energy whose later use pays for the round-trip losses, only as much as the expected house load needs, and leaves room for the sun. It re-plans every slot from the measured SOC, and on new prices or setting changes.
+The plan minimises the grid bill. No thresholds to tune: it only buys energy whose later use pays for the round-trip losses, only as much as the battery can actually deliver into the expected house load, and leaves room for the sun. It re-plans every slot from the measured SOC, and on new prices or setting changes.
 
 ### 3. Battery ledger
 Tracks what the usable energy in the battery (above SOC Min) cost: grid charges at their price, PV at 0 €. Shown as **Battery cost basis** (ct/kWh); the EUR counters count real grid charging only.
@@ -80,14 +80,14 @@ Entity IDs below are the usual ones; Home Assistant may prefix new entities with
 | `sensor.charge44_regulation_setpoint` / `_error` | plugin's PI controller |
 | `sensor.charge44_pack_state`, `_temperature` | state + temperature |
 | `sensor.charge44_current_price` | current electricity price (ct/kWh); attribute `prices_24h` |
-| `sensor.charge44_today_min_price` / `_max_price` | min/max of the next 24 h (ct/kWh) |
+| `sensor.charge44_today_min_price` / `_max_price` (**Min/Max price next 24 h**) | min/max of the next 24 h (ct/kWh) |
 | **Planned action** | `charge` / `hold` / `normal` for the current slot; attributes `plan` (every slot: start, action, SOC, price), `plan_cost_eur`, `baseline_cost_eur` (same horizon without battery) |
 | `sensor.charge44_next_cheap_window` (**Next grid charge**) | start of the next planned charge slot |
 | `sensor.charge44_cheap_charge_active` (**Grid charging**) | "on"/"off"; attribute `reason`: `optimizer`, `manual`, `reserve` |
 | **Round-trip efficiency** | conversion round trip the plan uses, with the hub's own draw taken out (measured over 28 days, ≤ 95 %; 85 % until measured); attributes `source`, `standby_w` (the SOC drop the plan assumes), `standby_balance_w` (the standby that fits the 28-day energy balance), `lifetime_out_in_pct` |
-| **House load forecast** | expected load this hour; attribute `profile` (7 days × 24 h) |
+| **House load forecast** | expected load this hour; attributes `profile` (7 days × 24 h), `coverable_w` / `coverable_profile` (the share of it the battery can cover, see *Coverable load*) |
 | **Battery cost basis** | average cost of the usable energy above SOC Min (ct/kWh); attribute `ledger_eur` |
-| **Standby consumption** | the hub's own draw from the battery, measured while idle (W); attributes `windows`, `last_window_w`, `last_window_hours` |
+| **Standby consumption** | the hub's own draw from the battery, measured while idle (W); attributes `windows`, `last_window_w`, `last_window_hours` (all kept across restarts) |
 | `sensor.charge44_solar_forecast_remaining`, **Solar forecast tomorrow** | kWh from your forecast sensors |
 | `sensor.charge44_cost_charged_today` / `_total` | cost of grid charging (EUR) |
 | `sensor.charge44_discharge_value_today` / `_total` | value of discharged energy (EUR) |
@@ -147,15 +147,17 @@ inputs   prices            Tibber, 15-min (or hourly) slots
          round trip η      conversion round trip without the hub's own draw,
                            split √η in / √η out
          standby           the hub's own draw, taken from the battery in every slot
-         house load        weekday × hour profile
+         house load        weekday × hour profile, and the share of it the
+                           inverter can cover (load clipped to its ceiling)
          PV                remaining-today / tomorrow kWh, spread along a sun bow
                            between sunrise and sunset
 
 per slot  charge  house from grid, grid + PV into the battery (up to SOC Max)
           hold    house from grid, PV into the battery; PV it can't take
-                  covers the house (Zendure "excess energy export")
+                  covers the house up to the coverable load (Zendure
+                  "excess energy export")
           normal  PV covers the house first, the battery the rest (down to
-                  SOC Min, within the inverter ceiling), surplus PV charges
+                  SOC Min, within the coverable load), surplus PV charges
 
 minimise  Σ grid import × price  (+ a prohibitive penalty for letting the
           standby drain the battery below SOC Min − 2 %)
@@ -165,6 +167,8 @@ minimise  Σ grid import × price  (+ a prohibitive penalty for letting the
 Energy still in the battery at the end of the horizon is valued at the cheapest known price, so the plan never buys speculatively beyond what it can use within the known prices; tomorrow's prices (~13:00) extend the horizon and the plan. Only the current slot is executed; it re-plans every slot from the measured SOC, on new prices, on SOC Min/Max changes and when the SOC drifts ≥ 3 % from the plan. The calculation (~0.1 s) runs in an executor.
 
 **Load profile:** one average per weekday and hour (7 × 24). Seeded at startup from the last 28 days of recorder statistics (Shelly grid power + Zendure output − Zendure grid input), then learned live; each weekday-hour moves with weight ¼ per week (~4-week memory). Hours without data fall back to the same hour on other days.
+
+**Coverable load:** what the battery can deliver into an hour is less than its mean load: a 10-minute 3 kW peak lifts the hourly mean by ~500 W, but the inverter covers 800 W of it at most, and the rest of the hour the house may draw 120 W. So a second profile learns the same load clipped to the inverter ceiling at every reading (~5 s), and the plan lets the battery and PV feed the house only up to that; grid costs still use the full load. On 9 days of October data the mean-load profile promised 62 kWh the battery could deliver, the clipped readings allowed 44 kWh — the plan bought energy at middling prices it couldn't place in the expensive hours. Hourly statistics have averaged the peaks away, so this profile is seeded from the recorder's 5-minute statistics (kept ~10 days) and stored in `.storage/charge44.<entry_id>`; after a restart only the hours since the last save are filled in from the statistics. Until it has any data, the plan uses the mean load.
 
 **Round trip:** the Zendure reports its conversions as lossless, so all losses only show up as energy that went into the battery and never came out. Over the last 28 days of statistics (re-measured daily): losses = energy in − energy out − extra still stored. The metered standby is taken out of that, the rest is the conversion round trip, capped at 95 % (cells plus inverter can't do better); the standby that would fit the balance at that cap is shown as `standby_balance_w`. It comes out lower than the metered SOC drop — near the bottom the displayed SOC falls faster than the kWh counters suggest — so the plan's drift uses the meter, the round trip uses the balance. Until the statistics are read, 85 % is assumed.
 
@@ -209,7 +213,7 @@ pytest tests/ -v
 
 Suites:
 - `tests/test_optimizer.py` — the DP: charging only when it pays, holding for pricier slots, partial charges, PV, negative prices, SOC limits; sun-bow PV distribution
-- `tests/test_load_profile.py` — weekday × hour profile, learning, fallbacks
+- `tests/test_load_profile.py` — weekday × hour profile, learning, fallbacks, persistence
 - `tests/test_standby.py` — standby-drain windows, BMS corrections, averaging, loss split / energy-balance fit
 - `tests/test_plan_execution.py` — planning inputs, executing the current slot, re-plan triggers, ledger, measured round trip, load learning
 - `tests/test_regulation.py` — PI loop + optimizer hold (safety blocks, deadzone, acMode self-heal, publish pacing)

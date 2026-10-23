@@ -7,6 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.storage import Store
 
 from .const import (
     CONF_ZENDURE_BATTERY_SNS,
@@ -16,6 +17,7 @@ from .const import (
     SERVICE_REFRESH_PRICES,
     SERVICE_SET_TARGET_SOC,
     SERVICE_STOP_CHARGE,
+    STORE_VERSION,
     TARGET_SOC_MIN,
 )
 from .coordinator import Charge44Coordinator
@@ -75,6 +77,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    await Store(hass, STORE_VERSION, f"{DOMAIN}.{entry.entry_id}").async_remove()
     sn = entry.data.get(CONF_ZENDURE_SN)
     battery_sns = entry.data.get(CONF_ZENDURE_BATTERY_SNS, []) or []
     if not sn:

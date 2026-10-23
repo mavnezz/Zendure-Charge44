@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -54,6 +55,8 @@ from .const import (
     EVENT_TEMPERATURE_GUARD,
     HEARTBEAT_INTERVAL,
     LOAD_SEED_DAYS,
+    STORE_SAVE_DELAY,
+    STORE_VERSION,
     MIN_PUBLISH_INTERVAL,
     OPTIMIZER_STEP_WH,
     REPLAN_SOC_DELTA,
@@ -77,7 +80,7 @@ from .const import (
     ZENDURE_SENSORS,
 )
 from .discovery import clear_legacy_discovery, pack_info, publish_zendure_discovery
-from .load_profile import LoadProfile
+from .load_profile import LoadProfile, hourly_means
 from .standby import StandbyMeter, fit_losses
 from .optimizer import (
     CHARGE,
@@ -173,6 +176,8 @@ class State:
     standby_balance_w: float | None = None  # W, standby that fits the 28-day balance
     load_now_w: float | None = None  # load-profile value for this hour
     load_profile: dict[str, list[float]] = field(default_factory=dict)
+    coverable_now_w: float | None = None  # share of it the inverter can cover
+    coverable_profile: dict[str, list[float]] = field(default_factory=dict)
 
     # Solar forecast (kWh)
     solar_remaining_kwh: float | None = None
@@ -224,6 +229,30 @@ class State:
     prices_24h: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _statistics_load(
+    stats: dict[str, list[dict[str, Any]]], grid: str, out: str, grid_in: str | None
+) -> list[tuple[datetime, float]]:
+    """(local period start, house load W) from recorder statistics means, in
+    time order: Shelly grid power + Zendure output − Zendure grid input."""
+    periods: dict[float, dict[str, float]] = {}
+    for eid, rows in stats.items():
+        for row in rows:
+            ts, mean = row.get("start"), row.get("mean")
+            if ts is None or mean is None:
+                continue
+            if isinstance(ts, datetime):
+                ts = ts.timestamp()
+            periods.setdefault(float(ts), {})[eid] = float(mean)
+    result = []
+    for ts in sorted(periods):
+        p = periods[ts]
+        if grid not in p or out not in p:
+            continue
+        load = max(0.0, p[grid] + p[out] - max(0.0, p.get(grid_in, 0.0)))
+        result.append((dt_util.as_local(dt_util.utc_from_timestamp(ts)), load))
+    return result
+
+
 class Charge44Coordinator:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
@@ -253,6 +282,11 @@ class Charge44Coordinator:
         self._stall_watch_since: float | None = None
         self._charge_seen_ts: float | None = None  # last real charge into the battery
         self._load = LoadProfile()
+        # The same load clipped to the inverter ceiling at every reading: what
+        # the battery can actually cover, peaks included. Persisted — the
+        # recorder keeps the 5-minute statistics it is rebuilt from only ~10 days.
+        self._coverable = LoadProfile()
+        self._store: Store = Store(hass, STORE_VERSION, f"{DOMAIN}.{entry.entry_id}")
         self._standby = StandbyMeter()
         self._eff_conv: float | None = None
         self._standby_balance: float | None = None  # standby that fits the energy balance
@@ -456,7 +490,13 @@ class Charge44Coordinator:
                 + self.state.output_home_power
                 - max(0.0, self.state.grid_input_power or 0.0)
             )
-            self._load.sample(dt_util.now(), max(0.0, load), dt_hours)
+            load = max(0.0, load)
+            now_local = dt_util.now()
+            self._load.sample(now_local, load, dt_hours)
+            if self._coverable.sample(
+                now_local, min(load, float(self.state.max_output)), dt_hours
+            ):
+                self._save_learned()
 
     def _track_standby(self) -> None:
         """Feed the standby meter: idle = nothing flows in or out of the
@@ -483,10 +523,18 @@ class Charge44Coordinator:
         s.standby_last_w = m.last_w
         s.standby_last_hours = m.last_hours
 
-    def restore_standby(self, value_w: float, windows: int) -> None:
-        self._standby.restore(value_w, windows)
+    def restore_standby(
+        self,
+        value_w: float,
+        windows: int,
+        last_w: float | None = None,
+        last_hours: float | None = None,
+    ) -> None:
+        self._standby.restore(value_w, windows, last_w, last_hours)
         self.state.standby_w = round(value_w, 1)
         self.state.standby_windows = self._standby.windows
+        self.state.standby_last_w = self._standby.last_w
+        self.state.standby_last_hours = self._standby.last_hours
 
     def _usable_kwh(self) -> float | None:
         """Energy above SOC Min — what the house can still get."""
@@ -962,6 +1010,9 @@ class Charge44Coordinator:
         local = dt_util.as_local(now)
         self.state.load_now_w = round(self._load.get(local.weekday(), local.hour))
         self.state.load_profile = self._load.table()
+        coverable = self._coverable_w(local)
+        self.state.coverable_now_w = None if coverable is None else round(coverable)
+        self.state.coverable_profile = self._coverable.table() if self._coverable.filled else {}
 
         if self._plan_due(now, window, current_entry):
             self._request_plan(now, window, current_entry)
@@ -1206,7 +1257,17 @@ class Charge44Coordinator:
                 continue
             local = dt_util.as_local(a)
             load_w = self._load.get(local.weekday(), local.hour)
-            slots.append(Slot(p["start"], hours, p["value"], load_w * hours, pv_wh))
+            coverable_w = self._coverable_w(local)
+            slots.append(
+                Slot(
+                    p["start"],
+                    hours,
+                    p["value"],
+                    load_w * hours,
+                    pv_wh,
+                    None if coverable_w is None else coverable_w * hours,
+                )
+            )
         battery = Battery(
             capacity_wh=cap_wh,
             min_wh=cap_wh * self.state.min_soc / 100.0,
@@ -1220,6 +1281,16 @@ class Charge44Coordinator:
         # Whether the device is grid-charging right now: stopping costs a mode
         # switch, so the plan won't cut a running charge for a fraction of a cent.
         return slots, battery, cap_wh * self.state.soc / 100.0, self.state.cheap_mode_active
+
+    def _coverable_w(self, local: datetime) -> float | None:
+        """Expected coverable load in W for that hour, never above the load
+        (the two profiles are seeded from different spans); None until learned."""
+        if not self._coverable.filled:
+            return None
+        return min(
+            self._coverable.get(local.weekday(), local.hour),
+            self._load.get(local.weekday(), local.hour),
+        )
 
     def _store_plan(
         self,
@@ -1288,8 +1359,10 @@ class Charge44Coordinator:
         return rise, set_
 
     async def _async_seed_load_profile(self) -> None:
-        """Fill the weekday profile from the last weeks of hourly statistics:
+        """Fill the weekday profiles from recorder statistics:
         load = Shelly grid power + Zendure output − Zendure grid input."""
+        await self._async_restore_learned()
+        since = self._coverable.last_hour
         try:
             from homeassistant.components.recorder import get_instance
             from homeassistant.components.recorder.statistics import (
@@ -1311,9 +1384,12 @@ class Charge44Coordinator:
             return
         end = dt_util.utcnow()
         start = end - timedelta(days=LOAD_SEED_DAYS)
+        # Whole hours only — the live readings fold in the current one.
+        hour = dt_util.as_local(end).replace(minute=0, second=0, microsecond=0)
         ids = {e for e in (grid, out, grid_in) if e}
+        recorder = get_instance(self.hass)
         try:
-            stats = await get_instance(self.hass).async_add_executor_job(
+            hourly = await recorder.async_add_executor_job(
                 statistics_during_period,
                 self.hass,
                 start,
@@ -1323,29 +1399,74 @@ class Charge44Coordinator:
                 None,
                 {"mean"},
             )
+            # The recorder keeps 5-minute statistics only for its purge
+            # window (10 days by default). With a stored profile, only the
+            # hours since it was last saved are missing.
+            five_min = await recorder.async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                start if since is None else max(start, since + timedelta(hours=1)),
+                hour,
+                ids,
+                "5minute",
+                None,
+                {"mean"},
+            )
         except Exception as err:
             _LOGGER.debug("charge44: load-profile seed failed: %s", err)
             return
-        hours: dict[float, dict[str, float]] = {}
-        for eid, rows in stats.items():
-            for row in rows:
-                ts, mean = row.get("start"), row.get("mean")
-                if ts is None or mean is None:
-                    continue
-                if isinstance(ts, datetime):
-                    ts = ts.timestamp()
-                hours.setdefault(float(ts), {})[eid] = float(mean)
-        seeded = 0
-        for ts in sorted(hours):
-            h = hours[ts]
-            if grid not in h or out not in h:
-                continue
-            load = max(0.0, h[grid] + h[out] - max(0.0, h.get(grid_in, 0.0)))
-            local = dt_util.as_local(dt_util.utc_from_timestamp(ts))
-            self._load.add_hour(local.weekday(), local.hour, load)
-            seeded += 1
-        _LOGGER.info("charge44: load profile seeded from %d hours of statistics", seeded)
+        self._seed_load_profiles(hourly, five_min, grid, out, grid_in, since)
+        self._save_learned()
         self._replan_requested = True
+
+    async def _async_restore_learned(self) -> None:
+        try:
+            data = await self._store.async_load()
+            if data and "coverable_load" in data:
+                self._coverable.restore(data["coverable_load"])
+        except Exception as err:  # a broken file only costs the history
+            _LOGGER.warning("charge44: stored load profile not usable: %s", err)
+
+    @callback
+    def _save_learned(self) -> None:
+        self._store.async_delay_save(
+            lambda: {"coverable_load": self._coverable.to_dict()}, STORE_SAVE_DELAY
+        )
+
+    def _seed_load_profiles(
+        self,
+        hourly: dict[str, list[dict[str, Any]]],
+        five_min: dict[str, list[dict[str, Any]]],
+        grid: str,
+        out: str,
+        grid_in: str | None,
+        since: datetime | None = None,
+    ) -> None:
+        """The load from hourly means; its coverable share from 5-minute means
+        clipped to the inverter ceiling — an hourly mean has already averaged
+        the peaks away — for the hours after `since` (the stored profile's
+        latest). (inverseMaxPower may not have arrived yet; the default is the
+        800 Pro's ceiling, and the plan caps at the live one anyway.)"""
+        hours = _statistics_load(hourly, grid, out, grid_in)
+        for local, load in hours:
+            self._load.add_hour(local.weekday(), local.hour, load)
+        ceiling = float(self.state.max_output)
+        coverable = hourly_means(
+            (
+                (local, min(load, ceiling))
+                for local, load in _statistics_load(five_min, grid, out, grid_in)
+            ),
+            5 / 60,
+        )
+        coverable = [(t, w) for t, w in coverable if since is None or t > since]
+        for local, watts in coverable:
+            self._coverable.add(local, watts)
+        _LOGGER.info(
+            "charge44: load profile seeded from %d hours of statistics, "
+            "its coverable share from %d",
+            len(hours),
+            len(coverable),
+        )
 
     # -------- Mode transitions --------
 

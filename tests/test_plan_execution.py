@@ -2,11 +2,14 @@
 slot, re-plan triggers, the battery ledger and the measured round trip."""
 from __future__ import annotations
 
+import asyncio
 import datetime
 import time
+from unittest.mock import AsyncMock
 
 import pytest
 
+from charge44.load_profile import LoadProfile
 from charge44.optimizer import CHARGE, HOLD, NORMAL, Step
 
 UTC = datetime.timezone.utc
@@ -164,12 +167,25 @@ def test_plan_inputs(opt):
     slots, bat, energy, charging = opt._build_plan_inputs(now, opt._price_slots(now))
     assert slots[0].hours == pytest.approx(0.25)  # 15 min left of this hour
     assert slots[0].load_wh == pytest.approx(100.0)
+    assert slots[0].coverable_wh is None  # not learned yet: the mean load
     assert bat.min_wh == pytest.approx(384.0)
     assert bat.max_wh == pytest.approx(3840.0)
     assert energy == pytest.approx(1536.0)
     assert charging is False
     assert bat.standby_w == 30.0  # default until the meter has two windows
     assert bat.floor_wh == pytest.approx(3840.0 * 0.08)  # SOC Min 10 % − 2 %
+
+
+def test_plan_inputs_coverable_load(opt):
+    _set_prices(opt, [0.30] * 4)
+    now = _hour() + datetime.timedelta(minutes=45)
+    opt._load.add_hour(now.weekday(), now.hour, 400.0)
+    opt._coverable.add_hour(now.weekday(), now.hour, 150.0)
+    nxt = now + datetime.timedelta(hours=1)
+    opt._coverable.add_hour(nxt.weekday(), nxt.hour, 600.0)  # newer span than the load
+    slots, *_ = opt._build_plan_inputs(now, opt._price_slots(now))
+    assert slots[0].coverable_wh == pytest.approx(0.25 * 150.0)
+    assert slots[1].coverable_wh == pytest.approx(400.0)  # never above the load
 
 
 def test_pv_days_from_forecast_and_sun(opt):
@@ -300,6 +316,74 @@ def test_house_load_learned_without_device_grid_charge(opt):
     assert seen == [pytest.approx(300.0)]
 
 
+def test_coverable_load_learned_up_to_the_inverter_ceiling(opt):
+    load, coverable = [], []
+    opt._load.sample = lambda when, watts, dt_h: load.append(watts)
+    opt._coverable.sample = lambda when, watts, dt_h: coverable.append(watts)
+    opt.state.max_output = 800
+    opt.state.grid_power = 2700.0  # kettle on, battery at its ceiling
+    opt.state.output_home_power = 800.0
+    opt.state.grid_input_power = 0.0
+    _tick_energy(opt, seconds=5)
+    assert load == [pytest.approx(3500.0)]
+    assert coverable == [pytest.approx(800.0)]
+
+
+def test_seed_coverable_share_from_five_minute_statistics(opt):
+    t0 = datetime.datetime(2026, 10, 19, 10, 0, tzinfo=UTC).timestamp()  # Monday
+    hourly = {
+        "grid": [{"start": t0, "mean": 241.7}],
+        "out": [{"start": t0, "mean": 100.0}],
+        "grid_in": [{"start": t0, "mean": 0.0}],
+    }
+    # 55 min at 100 W, 5 min at 3000 W: mean 342 W, coverable (11 × 100 + 800) / 12
+    means = [100.0] * 11 + [3000.0]
+    five = {
+        "grid": [{"start": t0 + 300 * i, "mean": m - 50.0} for i, m in enumerate(means)],
+        "out": [{"start": t0 + 300 * i, "mean": 50.0} for i in range(12)],
+    }
+    opt.state.max_output = 800
+    opt._seed_load_profiles(hourly, five, "grid", "out", "grid_in")
+    assert opt._load.get(0, 10) == pytest.approx(341.7)
+    assert opt._coverable.get(0, 10) == pytest.approx((11 * 100.0 + 800.0) / 12)
+
+
+def _five_min_hours(start, hours, watts):
+    ts = [start.timestamp() + 300 * i for i in range(12 * hours)]
+    return {"grid": [{"start": t, "mean": watts} for t in ts], "out": [{"start": t, "mean": 0.0} for t in ts]}
+
+
+def test_seed_with_stored_profile_adds_only_later_hours(opt):
+    t0 = datetime.datetime(2026, 10, 19, 10, 0, tzinfo=UTC)  # Monday 10:00
+    opt._coverable.add(t0 + datetime.timedelta(hours=1), 200.0)  # stored up to 11:00
+    opt._seed_load_profiles({}, _five_min_hours(t0, 3, 500.0), "grid", "out", None, since=opt._coverable.last_hour)
+    assert opt._coverable.get(0, 10) != 500.0  # 10:00 was already in the store: not again
+    assert opt._coverable.get(0, 11) == 200.0
+    assert opt._coverable.get(0, 12) == 500.0
+    assert opt._coverable.last_hour == t0 + datetime.timedelta(hours=2)
+
+
+def test_learned_hour_is_saved(opt):
+    opt.state.grid_power, opt.state.output_home_power = 300.0, 0.0
+    hour = _hour()
+    opt._coverable.sample(hour - datetime.timedelta(minutes=50), 300.0, 50 / 60)
+    _tick_energy(opt, seconds=5)  # now: next hour, the last one folds in
+    opt._store.async_delay_save.assert_called_once()
+    data = opt._store.async_delay_save.call_args[0][0]()
+    assert data["coverable_load"]["bins"]
+
+
+def test_restore_learned_profile(opt):
+    stored = LoadProfile()
+    stored.add(datetime.datetime(2026, 10, 19, 18, 0, tzinfo=UTC), 250.0)
+    opt._store.async_load = AsyncMock(return_value={"coverable_load": stored.to_dict()})
+    asyncio.run(opt._async_restore_learned())
+    assert opt._coverable.get(0, 18) == 250.0
+    opt._store.async_load = AsyncMock(return_value={"coverable_load": {"bins": [[1]]}})
+    asyncio.run(opt._async_restore_learned())  # broken file: logged, kept going
+    assert opt._coverable.get(0, 18) == 250.0
+
+
 # --- standby meter wiring -------------------------------------------------------
 
 def test_standby_meter_only_fed_when_idle(opt):
@@ -321,6 +405,9 @@ def test_standby_meter_only_fed_when_idle(opt):
 
 
 def test_standby_restore(opt):
-    opt.restore_standby(23.4, 3)
+    opt.restore_standby(23.4, 3, 28.8, 2.7)
     assert opt.state.standby_w == 23.4
     assert opt.state.standby_windows == 3
+    opt.state.pack_input = None
+    opt._track_standby()  # the next reading keeps the restored last window
+    assert (opt.state.standby_last_w, opt.state.standby_last_hours) == (28.8, 2.7)

@@ -47,6 +47,11 @@ class Slot:
     price: float  # EUR/kWh
     load_wh: float  # expected house consumption
     pv_wh: float  # expected PV production
+    # The part of the load the inverter can cover: the load clipped to its
+    # ceiling at every moment. Peaks raise the mean load, but the battery can't
+    # follow them past the ceiling (2026-10-23: the profile said 1036 W for an
+    # hour in which the house drew ~120 W). None: the mean load.
+    coverable_wh: float | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,12 @@ class Step:
     grid_wh: float  # expected grid import in the slot
 
 
+def _feed_cap(slot: Slot, output_w: float) -> float:
+    """Most the inverter can put into the house in the slot."""
+    cap = output_w * slot.hours
+    return cap if slot.coverable_wh is None else min(cap, slot.coverable_wh)
+
+
 def _simulate(
     action: str, energy: float, slot: Slot, bat: Battery, eta_in: float, eta_out: float
 ) -> tuple[float, float]:
@@ -91,8 +102,8 @@ def _flows(
     if action == HOLD:
         pv_in = min(pv * eta_in, room)
         pv_left = pv - pv_in / eta_in
-        return energy + pv_in, max(0.0, load - pv_left)
-    ac_max = bat.output_w * slot.hours
+        return energy + pv_in, max(0.0, load - min(pv_left, _feed_cap(slot, bat.output_w)))
+    ac_max = _feed_cap(slot, bat.output_w)
     pv_direct = min(pv, load, ac_max)
     energy += min((pv - pv_direct) * eta_in, room)
     deficit = load - pv_direct
@@ -191,7 +202,7 @@ def optimise(
 def baseline_cost(slots: list[Slot], output_w: float) -> float:
     """EUR the same horizon costs without a battery (PV still feeds the house)."""
     return sum(
-        max(0.0, s.load_wh - min(s.pv_wh, output_w * s.hours)) * s.price / 1000.0
+        max(0.0, s.load_wh - min(s.pv_wh, _feed_cap(s, output_w))) * s.price / 1000.0
         for s in slots
     )
 
