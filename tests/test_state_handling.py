@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import time
 
 from charge44.const import ZENDURE_NUMBERS
@@ -46,6 +47,32 @@ def test_successful_fetch_marks_prices_fresh(coord):
     coord._evaluate = lambda: None
     asyncio.run(coord._fetch_prices())
     assert coord._last_price_ok_ts > 0
+
+
+def test_price_poll_replans_only_on_new_prices(coord):
+    prices = {
+        "current": None,
+        "today": [{"startsAt": "2026-10-30T12:00:00+01:00", "total": 0.42}],
+        "tomorrow": [],
+    }
+
+    class _Tibber:
+        async def async_get_prices(self):
+            return json.loads(json.dumps(prices))
+
+    coord._tibber = _Tibber()
+    coord._evaluate = lambda: None
+    asyncio.run(coord._fetch_prices())
+    assert coord._replan_requested is True
+    coord._replan_requested = False
+    asyncio.run(coord._fetch_prices())
+    assert coord._replan_requested is False  # same prices, nothing to re-plan
+    prices["tomorrow"] = [{"startsAt": "2026-10-31T00:00:00+01:00", "total": 0.44}]
+    asyncio.run(coord._fetch_prices())
+    assert coord._replan_requested is True
+    coord._replan_requested = False
+    asyncio.run(coord.service_refresh_prices())
+    assert coord._replan_requested is True  # asked for by hand: re-plan anyway
 
 
 # --- point 10: daily EUR counters -----------------------------------------

@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from homeassistant.util import dt as dt_util
+
 from charge44.load_profile import LoadProfile
 from charge44.optimizer import CHARGE, HOLD, NORMAL, Step
 
@@ -19,8 +21,8 @@ def _hour():
     return datetime.datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
 
 
-def _set_prices(coord, values):
-    start = _hour()
+def _set_prices(coord, values, start=None):
+    start = start or _hour()
     coord.state.slot_minutes = 60
     coord.state.today_prices = [
         {"startsAt": (start + datetime.timedelta(hours=i)).isoformat(), "total": v}
@@ -86,8 +88,11 @@ def test_flat_prices_run_normal(opt):
     assert opt.state.next_charge_start is None
 
 
-def test_optimizer_off_means_normal_and_no_plan(opt):
-    _set_prices(opt, [0.10] + [0.40] * 20)
+def test_optimizer_off_means_normal_and_no_plan(opt, monkeypatch):
+    # Early in the hour: in its last minutes the cheap slot isn't worth a charge.
+    start = _hour()
+    monkeypatch.setattr(dt_util, "now", lambda: start + datetime.timedelta(minutes=5))
+    _set_prices(opt, [0.10] + [0.40] * 20, start)
     opt.plan_now()
     opt._evaluate()
     assert opt.state.cheap_mode_active is True
@@ -186,6 +191,23 @@ def test_plan_inputs_coverable_load(opt):
     slots, *_ = opt._build_plan_inputs(now, opt._price_slots(now))
     assert slots[0].coverable_wh == pytest.approx(0.25 * 150.0)
     assert slots[1].coverable_wh == pytest.approx(400.0)  # never above the load
+
+
+def test_coverable_profile_attribute_shows_what_the_plan_uses(opt):
+    now = _hour()
+    nxt = now + datetime.timedelta(hours=1)
+    opt._load.add_hour(now.weekday(), now.hour, 400.0)
+    opt._coverable.add_hour(now.weekday(), now.hour, 150.0)
+    opt._load.add_hour(nxt.weekday(), nxt.hour, 400.0)
+    opt._coverable.add_hour(nxt.weekday(), nxt.hour, 600.0)  # newer span than the load
+    table = opt._coverable_table()
+    days = ("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")
+    assert table[days[now.weekday()]][now.hour] == 150
+    assert table[days[nxt.weekday()]][nxt.hour] == 400
+
+
+def test_coverable_profile_attribute_empty_until_learned(opt):
+    assert opt._coverable_table() == {}
 
 
 def test_pv_days_from_forecast_and_sun(opt):
