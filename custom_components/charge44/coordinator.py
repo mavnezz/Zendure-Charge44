@@ -918,13 +918,19 @@ class Charge44Coordinator:
         if not prices:
             return
         self._last_price_ok_ts = time.monotonic()
-        self.state.today_prices = prices.get("today", []) or []
-        self.state.tomorrow_prices = prices.get("tomorrow", []) or []
+        today = prices.get("today", []) or []
+        tomorrow = prices.get("tomorrow", []) or []
+        # Only new prices call for a new plan. A poll lands anywhere in a slot,
+        # and over its last minute the decision is down to the rounding of the
+        # energy grid (2026-10-30: 12 two-minute flips hold → normal in 39 h).
+        if today != self.state.today_prices or tomorrow != self.state.tomorrow_prices:
+            self._replan_requested = True
+        self.state.today_prices = today
+        self.state.tomorrow_prices = tomorrow
         current = prices.get("current")
         if current:
             self.state.current_price = float(current.get("total", 0))
         self._detect_slot_minutes()
-        self._replan_requested = True
         self._evaluate()
 
     def _detect_slot_minutes(self) -> None:
@@ -1012,7 +1018,7 @@ class Charge44Coordinator:
         self.state.load_profile = self._load.table()
         coverable = self._coverable_w(local)
         self.state.coverable_now_w = None if coverable is None else round(coverable)
-        self.state.coverable_profile = self._coverable.table() if self._coverable.filled else {}
+        self.state.coverable_profile = self._coverable_table()
 
         if self._plan_due(now, window, current_entry):
             self._request_plan(now, window, current_entry)
@@ -1291,6 +1297,16 @@ class Charge44Coordinator:
             self._coverable.get(local.weekday(), local.hour),
             self._load.get(local.weekday(), local.hour),
         )
+
+    def _coverable_table(self) -> dict[str, list[float]]:
+        """The coverable profile as the plan uses it (see _coverable_w)."""
+        if not self._coverable.filled:
+            return {}
+        load = self._load.table()
+        return {
+            day: [min(coverable, watts) for coverable, watts in zip(values, load[day])]
+            for day, values in self._coverable.table().items()
+        }
 
     def _store_plan(
         self,
@@ -1715,6 +1731,7 @@ class Charge44Coordinator:
         self._evaluate()
 
     async def service_refresh_prices(self) -> None:
+        self._replan_requested = True  # asked for: re-plan even on the same prices
         await self._fetch_prices()
 
     @callback
